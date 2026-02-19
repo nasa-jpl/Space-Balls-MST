@@ -1,0 +1,94 @@
+import Monte as M
+import mpy.units as units
+
+#from .SimpleAlbedoForce import SimpleAlbedoForce
+from .MyTestForce import MyForceModel, create
+
+from ...analysis.solarflux import find_solar_flux, find_solar_force_atbody
+
+
+
+def load_fakesrp(boa, sc, body, forces, th):
+
+    #forces.append('Simple SRP')
+    
+    return 'blank'
+
+
+
+
+    '''
+    # forces: Earth Albedo
+    #forces.append(M.PySimpleForce)
+
+
+    firstForceModel = M.ForceFactory.create( 'Simple TestForce', boa, sc.name )
+
+    print("firstForceModel type: ", type(firstForceModel) )
+
+    #M.ForceFactory.add( 'Simple TestForce', create )
+    #obj = MyForceModel( boa, body )
+    #py = M.PySimpleForce( obj )
+    
+    #forces.append( py ) # 'Simple TestForce' )
+
+    forces.append( firstForceModel )#.name() )
+
+
+    #import MyTestForce
+
+    #forces.append( M.PySimpleForce )
+
+    #forceobj = SimpleAlbedoForce( boa, sc.name )
+    #force_pyObj = forceobj.instance()
+
+    #myForce = M.PySimpleForce( forceobj ) #    SimpleAlbedoForce(boa, sc.name)) # force_pyObj )
+
+    print(' ')
+    print('Loaded:  load_fakesrp - firstForceModel')
+    #print('Added PySimpleForce in fake_srp called: Simple TestForce')
+    print("firstForceModel type: ", type(firstForceModel) )  # type is:  <class 'Monte.PySimpleForce'>
+    print(' ')
+
+    return firstForceModel 
+
+    
+
+
+
+    #srp model
+
+    #set the flux level:
+    flux=.1020506244e+09*units.kg*units.km**3/(units.m**2*units.sec**2)
+    print("initial input flux is: ", flux)
+    #Note this is the solar equiv force
+    #ref: https://monte.jpl.nasa.gov/monte/doc/161/source/Monte/SolarPressure.html#monte-solarpressure-solarflux
+    # if this is not set here, the default is: 1.019794376000000e+17 *N   ; this corresponds with: 1366.1 W/m^2 for the solar constant
+
+    # method to set the flux:  needs a ref epoch/time:
+    time = th.start_epoch 
+
+    force = find_solar_force_atbody( boa, body, time)
+    print("Input flux is changed to a value for a particular epoch. Epoch is: ",time )
+    print( " flux is: ", force )
+
+    """
+    flux=find_solar_flux(boa, body, time)
+    print("Input flux is changed to a value for a particular epoch. Epoch is: ",time )
+    print( " flux is: ", flux )
+    """
+
+
+    #create the object:
+    solarRadPress=M.SolarPressure(boa, sc.name, sc.name + ' Shape', force)
+
+    #enable shadowing:
+    solarRadPress.addShadowBody(M.BodyName.Earth)
+
+    print(' ')
+    print( "Fake Solar Radiation Pressure loaded" )
+    print(' ')
+
+    return solarRadPress
+    '''
+

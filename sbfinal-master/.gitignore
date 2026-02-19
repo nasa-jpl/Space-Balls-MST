@@ -1,5 +1,11 @@
 Albedo*.py
 Thermal*.py
+Albedo*.npy
+Thermal*.npy
+*.png
+*.gif
+*.pdf
+*.jpg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

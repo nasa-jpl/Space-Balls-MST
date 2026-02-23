@@ -2,6 +2,7 @@ import sys, os
 import importlib.util
 import numpy as np
 import scipy.signal
+import scipy.interpolate
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR, INPUT_DIR, OUTPUT_DIR
 
 

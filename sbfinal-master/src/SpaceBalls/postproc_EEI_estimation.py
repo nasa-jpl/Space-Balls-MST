@@ -466,7 +466,7 @@ def generate_constellation_stacking_animations(case, sc_names, constellation_tag
         n_lon=n_lon, n_lat=n_lat,
         data_label='Stacked meas. radial flux (W/m$^2$)',
         out_dir=out_dir,
-        filename='Stacking_'+str(n_days)+'_days.gif',
+        filename='Stacking_'+str(n_days)+'_days.mp4',
         sat_h_lat_lon_hist_array=h_lat_lon_hist_array,
         sat_hist_jd_array=jd_hist_array,
         orbital_periods_minutes=T_array,
@@ -508,7 +508,7 @@ def generate_constellation_day_animations(case, sc_names, constellation_tag, day
                     SFF_tag = '_SFF' if SFF_bool else ''
                     avg_tag = '_wrt_avg' if avg_bool else ''
                     delta_str = 'Delta ' if avg_bool else ''
-                    fname = 'day_' + str(day_idx) + '_' + altitude_tag + SFF_tag + avg_tag + '.gif'
+                    fname = 'day_' + str(day_idx) + '_' + altitude_tag + SFF_tag + avg_tag + '.mp4'
 
                     if not(os.path.exists(os.path.join(out_dir, fname))):
                         print(f"Generating {fname}")

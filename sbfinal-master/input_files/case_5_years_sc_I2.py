@@ -52,10 +52,11 @@ FORCE_SETTINGS = {
         'Earth_grav': "GGM02C",
         'third_body_grav': ['Sun', 'Moon'],
         'srp_force' : True,
-        'erp_forces': ['Albedo', 'Thermal'],   # 'Albedo', 'Thermal'
-        'erp_sh_files': "historic_SYN1deg", #"historic",
-        'erp_sh_Nmax': 45,
+        #'erp_forces': ['Albedo', 'Thermal'],   # 'Albedo', 'Thermal'
+        #'erp_sh_files': "historic_SYN1deg", #"historic",
+        #'erp_sh_Nmax': 45,
         'aero_force' : True,
+        'EEI_truth': "EEI_truth_1",     # this defines the settings for all radiation-related forces
 
         #?? 'covalbedoforce' : False,
         #?? 'comboforce' : True,

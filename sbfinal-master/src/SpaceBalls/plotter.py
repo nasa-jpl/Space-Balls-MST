@@ -1,6 +1,6 @@
 
-import cartopy.crs as ccrs
-import cartopy.feature as cfeature
+
+
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -368,6 +368,7 @@ class Plotter:
         sat_hist_steps_minutes = [np.mean(np.diff(sat_jd_vec)) * 24 * 60 for sat_jd_vec in sat_hist_jd_array]
 
         if add_coastlines:
+            import cartopy.feature as cfeature
             coastlines = cfeature.NaturalEarthFeature(
                         category='physical',
                         name='coastline',
@@ -611,12 +612,14 @@ class Plotter:
 
     @classmethod
     def get_coastline_axes(cls, f_width=1, f_height=1, fade_coastlines=False):
+        import cartopy.crs as ccrs
 
         _, ax_coast = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()},  # PlateCarree
                                    figsize=(2 * cls.fig_width * f_width, cls.fig_height * f_height),
                                     dpi=200)
         #
         if fade_coastlines:
+            import cartopy.feature as cfeature
             coast = cfeature.NaturalEarthFeature(
                 'physical', 'coastline', '110m',    # or 50m / 10m
                 edgecolor='k', facecolor='none'

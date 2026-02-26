@@ -3,6 +3,8 @@ import importlib.util
 import numpy as np
 import scipy.signal
 import scipy.interpolate
+import json
+import hashlib
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR, INPUT_DIR, OUTPUT_DIR
 
 
@@ -29,11 +31,11 @@ def get_two_perp_unit_vectors(u):
 
 def progress_bar(i, n, length=40):
     """Efficient inline progress bar."""
-    frac = i / n
+    frac = i / (n-1)
     filled = int(length * frac)
     bar = '█' * filled + '-' * (length - filled)
     print(f'\r[{bar}] {100*frac:6.2f}%', end='', file=sys.stdout)
-    if i == n:
+    if i == n-1:
         print()  # newline at the end
 
 
@@ -141,3 +143,24 @@ def nanrms(data, axis=None): # by Google AI
     """
     # Square the data, compute the mean while ignoring NaNs, then take the square root
     return np.sqrt(np.nanmean(data**2, axis=axis))
+
+
+def make_dict_hash_key(input_dict):
+
+    input_dict_filtererd = {key:value for (key, value) in input_dict.items() 
+                            if (not(isinstance(value, dict)) and value is not None) or 
+                            (isinstance(value, dict) and value and not(all(v is None for v in value.values())))} 
+                            # filter None entries, empty dicts and dicts that contain None for all fields
+    key_string = json.dumps(input_dict_filtererd, sort_keys=True)
+    
+    #hash_str = hashlib.sha256(key_string.encode()).hexdigest()
+    hash_str = hashlib.blake2b(key_string.encode(), digest_size=8).hexdigest()
+    return hash_str
+
+def make_list_str_key(input_list, sep='|'):
+    return sep.join(sorted(input_list))
+
+
+def get_2D_to_1D_idx(row_idx, col_idx, n_cols):
+    # this function defines the idx transformation so that the result of the stretched matrix is the same as in np.reshape()
+    return row_idx*n_cols + col_idx

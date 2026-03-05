@@ -155,7 +155,7 @@ def get_stacked_avg_maps_2D_mode(jd_windows, jd_hist_array, all_2D_measurement_a
         stacked_meas_2D_array = scipy.sparse.vstack(all_2D_measurement_arrays) # stacked here means place on top of one another
 
         for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
-            progress_bar(window_i, len(jd_windows))
+            #progress_bar(window_i, len(jd_windows))
             first_idx, last_idx = first_last_idxs[window_i,:]
             all_meas_counts = getnnz(stacked_meas_2D_array[:,first_idx:last_idx], axis=1)
             all_stacked_meas = stacked_meas_2D_array[:,first_idx:last_idx].sum(axis=1) #stacked as in compressed along time axis but they are still stacked as in the meaning before
@@ -167,7 +167,7 @@ def get_stacked_avg_maps_2D_mode(jd_windows, jd_hist_array, all_2D_measurement_a
     else:
         print("jd_vecs are not equal - looping over individual sc arrays")
         for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
-            progress_bar(window_i, len(jd_windows))
+            #progress_bar(window_i, len(jd_windows))
             stacked_measurements_array = [None] * n_sc
             meas_counts_array = [None] * n_sc
 
@@ -885,6 +885,7 @@ def compute_rolling_avg_error_time_series(sc_array, window_days, EEI_truth_time_
     error_time_series = EEI_smooth_estimated-EEI_smooth_true_coarse
 
     return error_time_series
+
 
 
 def compute_sample_quality_metrics(constellation_list):

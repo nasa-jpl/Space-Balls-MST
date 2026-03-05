@@ -164,3 +164,20 @@ def make_list_str_key(input_list, sep='|'):
 def get_2D_to_1D_idx(row_idx, col_idx, n_cols):
     # this function defines the idx transformation so that the result of the stretched matrix is the same as in np.reshape()
     return row_idx*n_cols + col_idx
+
+
+def latlon_to_coord_name(latlon_pair):
+    lat, lon = latlon_pair
+    if lat>=0:
+        lat_name = str(lat) + ' N'
+    else:
+        lat_name = str(np.abs(lat)) + ' S'
+
+    if lon>=0:
+        lon_name = str(lon) + ' E'
+    else:
+        lon_name = str(lon) + ' W'
+
+    full_str = lat_name + '; ' + lon_name
+
+    return full_str

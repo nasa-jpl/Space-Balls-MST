@@ -13,6 +13,7 @@ from SpaceBalls.plotter import Plotter
 
 estimation_out_dir = os.path.join(MEDIA_DIR, 'EEI_estimations')
 
+k = 1 # number of satellites in constellation
 
 EEI_name = "EEI_truth_1"
 full_jd_array = np.concatenate(get_EEI_truth_daily_jd_arrays(EEI_name))
@@ -21,7 +22,7 @@ EEI_time_series_180x360 = get_true_EEI_time_series(EEI_name, 360, 180)
 
 all_sc_tags = ['A1', 'A2', 'A3', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'C1', 'C2', 'C3', 'D1', 'D2', 'D3', 
                'E1', 'E2', 'E3', 'F1', 'F2', 'F3', 'F11', 'F12', 'G1', 'G2', 'G3', 'H1', 'H2', 'H3', 'I1', 'I2', 'I3']
-all_sat_combinations_k3 = list(itertools.combinations((all_sc_tags), 3))
+all_sat_combinations_k3 = list(itertools.combinations((all_sc_tags), k))
 
 #constellation_letters = ['H', 'I']
 #for letter in constellation_letters:
@@ -42,8 +43,8 @@ for window_name, window_days in zip(smoothing_windows_names, smoothing_windows_d
 
     for sat_names in all_sat_combinations_k3:
 
-        #SB_constellation = ['sc_' + sc_name for sc_name in sat_names]
-        SB_constellation = ['sc_H1', 'sc_H2', 'sc_H3']
+        SB_constellation = ['sc_' + sc_name for sc_name in sat_names]
+        #SB_constellation = ['sc_H1', 'sc_H2', 'sc_H3']
 
         estimation_config_dict = {'EEI_truth_name': EEI_name, 
                 'satellite_list': SB_constellation,

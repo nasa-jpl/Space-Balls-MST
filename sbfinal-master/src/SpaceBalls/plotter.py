@@ -81,6 +81,7 @@ class Plotter:
     @classmethod
     def plot_time_series(cls, jd_vec, y_dict, 
                          y_dict_right=None, y_scatter_dict=None, scatter_alpha=1,
+                         scatter_marker='.', scatter_size=8, scatter_color='cyan',
                          f_height=1, f_width=1, 
                          ylabel=None, xlabel=None, 
                          yscale="linear", linthresh=1e-10, 
@@ -125,9 +126,9 @@ class Plotter:
                     
                 col_idx = np.remainder(i+j+1, len(cls.line_colors))
                 ax.scatter(cls.jd_to_datetime(jd), y, label=label, #label=cls.raw(label), 
-                           color='cyan', #cls.line_colors[col_idx], 
-                           marker='.',
-                           s=8, alpha=scatter_alpha, edgecolors='none', rasterized=True)
+                           color=scatter_color, #cls.line_colors[col_idx], 
+                           marker=scatter_marker,
+                           s=scatter_size, alpha=scatter_alpha, edgecolors='none', rasterized=True)
                 if add_averages:
                     ax.axhline(np.mean(y), color=cls.line_colors[col_idx])
             
@@ -448,7 +449,8 @@ class Plotter:
         all_lon_hist = [h_lat_lon_hist[:,2] for h_lat_lon_hist in sat_h_lat_lon_hist_array]
         all_lat_hist = [h_lat_lon_hist[:,1] for h_lat_lon_hist in sat_h_lat_lon_hist_array]
 
-        all_lat_hist_map_steps, all_lon_hist_map_steps = cls.prepare_sat_groundtrack_hist(jd_vec, sat_hist_jd_array, sat_h_lat_lon_hist_array)
+        if add_satellite_positions:
+            all_lat_hist_map_steps, all_lon_hist_map_steps = cls.prepare_sat_groundtrack_hist(jd_vec, sat_hist_jd_array, sat_h_lat_lon_hist_array)
 
         n_satellites = len(sat_hist_jd_array)
         groundtrack_array = cls.initialize_groundtrack_plots(ax, n_satellites, linestyle=groundtrack_linstyle)

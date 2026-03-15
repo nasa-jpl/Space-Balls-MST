@@ -14,7 +14,7 @@ from multiprocessing import Pool
 
 estimation_out_dir = os.path.join(MEDIA_DIR, 'EEI_estimations')
 
-k = 1 # number of satellites in constellation
+k = 3 # number of satellites in constellation
 nproc = 1
 smoothing_windows_days = [365, 182, 30]
 
@@ -47,6 +47,7 @@ def store_results_to_database(sat_names):
             'accelerometer_errors': {'drift': None,
                                     'scale': None,
                                     'noise': None},
+            'method': {'SH_field_fit': {'lmax': 15}},    
             'model_errors': {}}
     config_hash_key = make_dict_hash_key(estimation_config_dict)
     

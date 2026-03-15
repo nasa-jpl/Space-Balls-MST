@@ -419,7 +419,8 @@ class Shape():
         #Enter Shape Data for Earth (used for finding Long and Lat )
 
         R_Earth = constants.earth_radius(monte_units=True)   # TODO: WGS84 is hard-coded
-        f_Earth = constants.earth_flattening()
+        #f_Earth = constants.earth_flattening()
+        f_Earth = 0
 
         e = M.Ellipsoid( R_Earth, f_Earth )
         shape = M.EllipsoidShape( boa, 'Earth Shape #1', 'Earth', e )
@@ -771,6 +772,10 @@ class ForceManager():
 
         #enable shadowing:
         solarRadPress.addShadowBody(M.BodyName.Earth)
+
+        # TODO: if smooth shadow disabled
+        solarRadPress.setShadowThreshold(1 * units.radian)
+        print("The Sun is a point-source now")
 
         self.pressforces.append(solarRadPress)
         self.force_names.append('srp')

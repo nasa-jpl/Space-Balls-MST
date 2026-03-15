@@ -6,6 +6,7 @@ Thermal*.npy
 *.gif
 *.pdf
 *.jpg
+*.boa
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

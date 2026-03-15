@@ -9,7 +9,7 @@ from multiprocessing import Pool
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR
 sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
 import SpaceBalls.radiation_settings as rad_settings
-from SpaceBalls.sph_meshing import get_sphere_grid, get_spherical_grid_cell_areas, lonlat_to_r, expand_sh_grid, get_stacked_spherical_grid_els, progress_bar, field_hist_rotation
+from SpaceBalls.sph_meshing import get_sphere_grid, get_spherical_grid_cell_areas, lonlat_to_r, expand_sh_grid, get_stacked_spherical_grid_els, progress_bar, field_hist_rotation, field_hist_rotation_multiproc
 import config.constants as constants
 
 AU = constants.astronomical_unit(units='km')
@@ -23,7 +23,8 @@ def required_files(alt_km):
                 'daily_avg_net_toa']
     elif alt_km>0: 
         return ['daily_hist_net_'+str(alt_km)+'km', 'daily_hist_net_'+str(alt_km)+'km_SFF',
-                'daily_avg_net_'+str(alt_km)+'km', 'daily_avg_net_'+str(alt_km)+'km_SFF']
+                'daily_avg_net_'+str(alt_km)+'km', 'daily_avg_net_'+str(alt_km)+'km_SFF',
+                'daily_avg_net_'+str(alt_km)+'km_simpl1', 'daily_avg_net_'+str(alt_km)+'km_simpl1_SFF']
 
 
 def get_EEI_truth_daily_jd_arrays(EEI_truth_name):
@@ -59,8 +60,10 @@ def compute_radiation_maps(EEI_truth_name, altitude_array = [0, 800, 1500], degr
         grid_cell_areas_toa = get_spherical_grid_cell_areas(lat_edges_vec, lon_edges_vec, RE)
 
         for altitude_km in altitude_array:
-            daily_jd_arrays_to_loop = daily_jd_arrays_reduced if altitude_km>0 else daily_jd_arrays
-            idxs_days_to_loop = selected_days_idxs if altitude_km>0 else range(n_days)
+            #daily_jd_arrays_to_loop = daily_jd_arrays_reduced if altitude_km>0 else daily_jd_arrays
+            #idxs_days_to_loop = selected_days_idxs if altitude_km>0 else range(n_days)
+            daily_jd_arrays_to_loop = daily_jd_arrays
+            idxs_days_to_loop = np.arange(n_days)
             
             for day_idx, jd_array in zip(idxs_days_to_loop, daily_jd_arrays_to_loop):
                 
@@ -81,13 +84,21 @@ def compute_radiation_maps(EEI_truth_name, altitude_array = [0, 800, 1500], degr
                                    day_idx, R_ECEF_to_SunFrame_day_hist, save_SFF_hist=(day_idx in selected_days_idxs))
 
                 elif altitude_km>0 and not(all(file_existences.values())):
+                    
+                    if day_idx in selected_days_idxs:
+                        daily_hist_net_altitude = get_daily_hist_net_at_altitude(
+                                out_dir, altitude_km, day_idx, mid_day_jd, TSI_1AU_day, rad_config, n_lon, n_lat, n_steps, n_cores
+                            )
+                    else:
+                        daily_hist_net_altitude = None
 
-                    daily_hist_net_altitude = get_daily_hist_net_at_altitude(
-                            out_dir, altitude_km, day_idx, mid_day_jd, TSI_1AU_day, rad_config, n_lon, n_lat, n_steps, n_cores
-                        )
-                    save_altitude_files(daily_hist_net_altitude, altitude_km, day_idx, out_dir, R_ECEF_to_SunFrame_day_hist)
+                    if not(file_existences['daily_avg_net_'+str(altitude_km)+'km_simpl1']) or not(file_existences['daily_avg_net_'+str(altitude_km)+'km_simpl1_SFF']):
+                        daily_avg_at_altitude_simpl1, daily_avg_at_altitude_simpl1_SFF = compute_daily_avg_net_at_altitude_simpl_1(
+                                out_dir, altitude_km, day_idx, mid_day_jd, TSI_1AU_day, rad_config, n_lon, n_lat, n_steps, n_cores
+                            )
+                        save_altitude_files(daily_hist_net_altitude, daily_avg_at_altitude_simpl1, daily_avg_at_altitude_simpl1_SFF, 
+                                            altitude_km, day_idx, out_dir, R_ECEF_to_SunFrame_day_hist)
 
-                    # separate get vs compute daily function, work on SFF, check it all
 
                 print("")
 
@@ -136,6 +147,19 @@ def get_daily_hist_net_at_altitude(data_dir, altitude_km, day_idx, mid_day_jd, T
     return daily_hist_net_altitude
 
 
+def get_solar_incoming_day_hist(rad_config, mid_day_jd, altitude_km, n_lat, n_lon, TSI_1AU_day):
+    
+    lon_vec, lat_vec, _, _ = get_sphere_grid(n_lon, n_lat)
+    _, stacked_grid_u_el = get_stacked_spherical_grid_els(lon_vec, lat_vec, altitude_km, total_R=RE+altitude_km)     # stacked_grid_r_el is at altitude
+    
+    d_sun_day, u_sun_day = get_d_u_sun_hist(rad_config["ephemerides"], mid_day_jd)         # stacked_grid_u_el is independent of altitude
+    zeroed_cos_theta_s_day_hist = get_zeroed_cos_theta_s_hist(stacked_grid_u_el, u_sun_day, altitude_km, n_lat, n_lon)
+    
+    TSI_Earth_day_vec = TSI_1AU_day * (AU/d_sun_day)**2
+    solar_incoming_day_hist = zeroed_cos_theta_s_day_hist * TSI_Earth_day_vec[None, None, :]
+
+    return solar_incoming_day_hist
+
 
 def compute_daily_hist_net_at_altitude(data_dir, altitude_km, day_idx, mid_day_jd, TSI_1AU_day, rad_config, n_lon, n_lat, n_steps, n_cores):
     
@@ -149,11 +173,11 @@ def compute_daily_hist_net_at_altitude(data_dir, altitude_km, day_idx, mid_day_j
     toa_emission_day_hist, _ = get_daily_hist_toa(data_dir, day_idx, mid_day_jd, TSI_1AU_day, rad_config, 
                                             lon_vec, lat_vec, n_steps)
     
-    d_sun_day, u_sun_day = get_d_u_sun_hist(rad_config["ephemerides"], mid_day_jd)         # stacked_grid_u_el is independent of altitude
-    zeroed_cos_theta_s_day_hist = get_zeroed_cos_theta_s_hist(stacked_grid_u_el, u_sun_day, altitude_km, n_lat, n_lon)
-    
-    TSI_Earth_day_vec = TSI_1AU_day * (AU/d_sun_day)**2
-    solar_incoming_day_hist = zeroed_cos_theta_s_day_hist * TSI_Earth_day_vec[None, None, :]
+    # d_sun_day, u_sun_day = get_d_u_sun_hist(rad_config["ephemerides"], mid_day_jd)         # stacked_grid_u_el is independent of altitude
+    # zeroed_cos_theta_s_day_hist = get_zeroed_cos_theta_s_hist(stacked_grid_u_el, u_sun_day, altitude_km, n_lat, n_lon)
+    # 
+    # TSI_Earth_day_vec = TSI_1AU_day * (AU/d_sun_day)**2
+    # solar_incoming_day_hist = zeroed_cos_theta_s_day_hist * TSI_Earth_day_vec[None, None, :]
 
     toa_emission_mapped_to_altitude_hist = np.zeros((n_lat, n_lon, n_steps))
 
@@ -167,10 +191,68 @@ def compute_daily_hist_net_at_altitude(data_dir, altitude_km, day_idx, mid_day_j
             toa_emission_day_hist[:,:,i], n_lat, n_lon, n_workers=n_cores
         )
     print("")
+
+    solar_incoming_day_hist = get_solar_incoming_day_hist(rad_config, mid_day_jd, altitude_km, n_lat, n_lon, TSI_1AU_day)
+
     daily_hist_net_altitude = solar_incoming_day_hist - toa_emission_mapped_to_altitude_hist
 
     return daily_hist_net_altitude
 
+
+
+def compute_daily_avg_net_at_altitude_simpl_1(data_dir, altitude_km, day_idx, mid_day_jd, TSI_1AU_day, rad_config, n_lon, n_lat, n_steps, n_cores):
+    
+    lon_vec, lat_vec, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
+    stacked_grid_r_el, stacked_grid_u_el = get_stacked_spherical_grid_els(lon_vec, lat_vec, altitude_km, total_R=RE+altitude_km)     # stacked_grid_r_el is at altitude
+    
+    grid_r_el_toa = lonlat_to_r(lon_vec, lat_vec, 0, "spherical")
+    grid_u_el = grid_r_el_toa / RE
+    grid_cell_areas_toa = get_spherical_grid_cell_areas(lat_edges_vec, lon_edges_vec, RE)
+
+    
+    # ECEF:
+    solar_incoming_day_hist = get_solar_incoming_day_hist(rad_config, mid_day_jd, altitude_km, n_lat, n_lon, TSI_1AU_day)
+    solar_incoming_day_avg = np.mean(solar_incoming_day_hist, axis=2)
+    
+    toa_emission_day_hist, _ = get_daily_hist_toa(data_dir, day_idx, mid_day_jd, TSI_1AU_day, rad_config, 
+                                            lon_vec, lat_vec, n_steps)
+
+    daily_avg_emission_toa = np.mean(toa_emission_day_hist, axis=2)
+
+    daily_avg_emission_toa_mapped_to_altitude = convolve_toa_emission_to_altitude(
+        stacked_grid_r_el, stacked_grid_u_el,          # we are using the same grid for toa and altitude
+        grid_r_el_toa, grid_u_el, grid_cell_areas_toa, 
+        daily_avg_emission_toa, n_lat, n_lon, n_workers=n_cores
+    )
+
+    daily_avg_at_altitude_simpl1 = solar_incoming_day_avg - daily_avg_emission_toa_mapped_to_altitude
+
+
+    # SFF:
+    R_ECEF_to_SunFrame_day_hist = get_R_SunFrame_hist(rad_config["ephemerides"], mid_day_jd)
+
+    #solar_incoming_day_hist_SFF = np.nan_to_num(field_hist_rotation(solar_incoming_day_hist, R_ECEF_to_SunFrame_day_hist))
+    solar_incoming_day_hist_SFF = np.nan_to_num(field_hist_rotation_multiproc(solar_incoming_day_hist, R_ECEF_to_SunFrame_day_hist, n_cores=n_cores))
+
+    daily_avg_incoming_solar_SFF = np.mean(solar_incoming_day_hist_SFF, axis=2)
+
+    #toa_emission_day_hist_SFF = np.nan_to_num(field_hist_rotation(toa_emission_day_hist, R_ECEF_to_SunFrame_day_hist))
+    toa_emission_day_hist_SFF = np.nan_to_num(field_hist_rotation_multiproc(toa_emission_day_hist, R_ECEF_to_SunFrame_day_hist, n_cores=n_cores))
+    daily_avg_emission_toa_SFF = np.mean(toa_emission_day_hist_SFF, axis=2)
+
+    daily_avg_emission_toa_mapped_to_altitude_SFF = convolve_toa_emission_to_altitude(
+        stacked_grid_r_el, stacked_grid_u_el,          # we are using the same grid for toa and altitude
+        grid_r_el_toa, grid_u_el, grid_cell_areas_toa, 
+        daily_avg_emission_toa_SFF, n_lat, n_lon, n_workers=n_cores
+    )
+
+    daily_avg_at_altitude_simpl1_SFF = daily_avg_incoming_solar_SFF - daily_avg_emission_toa_mapped_to_altitude_SFF
+
+    # back to ECEF now (should it give the same? My bet is no because the SFF gets rid of the diurnal cycle)
+    #daily_avg_at_altitude_simpl1b = field_hist_rotation(daily_avg_at_altitude_simpl1_SFF, R_ECEF_to_SunFrame_day_hist, transpose_R=True)
+
+
+    return daily_avg_at_altitude_simpl1, daily_avg_at_altitude_simpl1_SFF #, daily_avg_at_altitude_simpl1b
 
 
 def save_toa_files(toa_emission_day_hist, net_toa_day_hist, grid_cell_areas_toa, data_dir, day_idx, R_ECEF_to_SunFrame_day_hist, save_SFF_hist=True):
@@ -207,31 +289,46 @@ def save_toa_files(toa_emission_day_hist, net_toa_day_hist, grid_cell_areas_toa,
         np.save(all_file_names['daily_avg_net_toa'], net_toa_daily_avg)
 
 
-def save_altitude_files(daily_hist_net_altitude, altitude_km, day_idx, data_dir, R_ECEF_to_SunFrame_day_hist):
+def save_altitude_files(daily_hist_net_altitude, daily_avg_at_altitude_simpl1, daily_avg_at_altitude_simpl1_SFF, 
+                        altitude_km, day_idx, data_dir, R_ECEF_to_SunFrame_day_hist):
 
     all_file_names, file_existences = get_file_names_and_existence(data_dir, altitude_km, day_idx)
     
-    if not(file_existences['daily_hist_net_'+str(altitude_km)+'km']):
-        print(f"Saving daily_hist_net_{altitude_km}km file...")
-        np.save(all_file_names['daily_hist_net_'+str(altitude_km)+'km'], daily_hist_net_altitude)
+    if (daily_hist_net_altitude is not None):
+    
+        if not(file_existences['daily_hist_net_'+str(altitude_km)+'km']):
+            print(f"Saving daily_hist_net_{altitude_km}km file...")
+            np.save(all_file_names['daily_hist_net_'+str(altitude_km)+'km'], daily_hist_net_altitude)
 
-    if not(file_existences['daily_hist_net_'+str(altitude_km)+'km_SFF']):
-        print(f"Saving daily_hist_net_{altitude_km}km file Sun-Fixed Frame...")
-        daily_hist_net_altitude_SFF = field_hist_rotation(daily_hist_net_altitude, R_ECEF_to_SunFrame_day_hist)
-        np.save(all_file_names['daily_hist_net_'+str(altitude_km)+'km_SFF'], daily_hist_net_altitude_SFF)
+        if not(file_existences['daily_hist_net_'+str(altitude_km)+'km_SFF']):
+            print(f"Saving daily_hist_net_{altitude_km}km file Sun-Fixed Frame...")
+            daily_hist_net_altitude_SFF = field_hist_rotation(daily_hist_net_altitude, R_ECEF_to_SunFrame_day_hist)
+            np.save(all_file_names['daily_hist_net_'+str(altitude_km)+'km_SFF'], daily_hist_net_altitude_SFF)
+
+        if not(file_existences['daily_avg_net_'+str(altitude_km)+'km']):
+            print(f"Saving daily_avg_net_{altitude_km}km file...")
+            daily_avg_net_altitude = np.mean(daily_hist_net_altitude, axis=2)
+            np.save(all_file_names['daily_avg_net_'+str(altitude_km)+'km'], daily_avg_net_altitude)
+        
+        if not(file_existences['daily_avg_net_'+str(altitude_km)+'km_SFF']):
+            # if it didn't exist we just saved it above so we can always load it:
+            print(f"Saving daily_avg_net_{altitude_km}km_SFF file...")
+            daily_hist_net_altitude_SFF = np.load(all_file_names['daily_hist_net_'+str(altitude_km)+'km_SFF']+'.npy')
+            daily_avg_net_altitude_SFF = np.mean(daily_hist_net_altitude_SFF, axis=2)
+            np.save(all_file_names['daily_avg_net_'+str(altitude_km)+'km_SFF'], daily_avg_net_altitude_SFF)
 
     
-    if not(file_existences['daily_avg_net_'+str(altitude_km)+'km']):  # TODO: exisitng daily_avg_net_800km files are wrong if memory doesn't fail
-        print(f"Saving daily_avg_net_{altitude_km}km file...")
-        daily_avg_net_altitude = np.mean(daily_hist_net_altitude, axis=2)
-        np.save(all_file_names['daily_avg_net_'+str(altitude_km)+'km'], daily_avg_net_altitude)
-    
-    if not(file_existences['daily_avg_net_'+str(altitude_km)+'km_SFF']):
-        # if it didn't exist we just saved it above so we can always load it:
-        print(f"Saving daily_avg_net_{altitude_km}km_SFF file...")
-        daily_hist_net_altitude_SFF = np.load(all_file_names['daily_hist_net_'+str(altitude_km)+'km_SFF']+'.npy')
-        daily_avg_net_altitude_SFF = np.mean(daily_hist_net_altitude_SFF, axis=2)
-        np.save(all_file_names['daily_avg_net_'+str(altitude_km)+'km_SFF'], daily_avg_net_altitude_SFF)
+    if not(file_existences['daily_avg_net_'+str(altitude_km)+'km_simpl1']):
+        # simplification 1: we convolve the daily avg of the computed net emission toa to altitude and combine it with the actual mean of incoming solar
+        print(f"Saving daily_avg_net_{altitude_km}km_simpl1 file...")
+        np.save(all_file_names['daily_avg_net_'+str(altitude_km)+'km_simpl1'], daily_avg_at_altitude_simpl1)
+
+    if not(file_existences['daily_avg_net_'+str(altitude_km)+'km_simpl1_SFF']):
+        # simplification 1 SFF: simplification 1 but the process is done after rotating the separate fields to the SFF before computing the daily avg
+        print(f"Saving daily_avg_net_{altitude_km}km_simpl1_SFF file...")
+        np.save(all_file_names['daily_avg_net_'+str(altitude_km)+'km_simpl1_SFF'], daily_avg_at_altitude_simpl1_SFF)
+
+        
 
 
 

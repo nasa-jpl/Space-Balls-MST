@@ -1,7 +1,7 @@
 
 
 
-
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.colors as colors
@@ -19,6 +19,40 @@ from SpaceBalls.utils import get_clean_lonlat_vecs_for_plot, get_two_perp_unit_v
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR
 sys.path.insert(0, str(CONFIG_DIR.parent)) 
 import config.constants as constants
+
+matplotlib.rcParams.update({
+
+    # Font
+    "font.size": 10,
+    "font.family": "STIXGeneral",  # A clean, professional font
+    "mathtext.fontset": "stix",
+
+    # Axes
+    "axes.linewidth": 0.8,
+    "axes.labelsize": 10,
+    "axes.titlesize": 10,
+
+    # Lines
+    "lines.linewidth": 1.5,
+    "lines.markersize": 4,
+
+    # Ticks
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+
+    # Legend
+    "legend.fontsize": 9,
+    "legend.frameon": False,
+
+    # Grid (usually off in publications)
+    "axes.grid": False,
+
+    # Figure
+    "figure.dpi": 150
+})
+
 
 class Plotter:
     
@@ -176,16 +210,47 @@ class Plotter:
             os.makedirs(out_dir, exist_ok=True)       
             fig.savefig(os.path.join(out_dir,file_name+out_fmt), dpi=600, bbox_inches='tight')
     
+
+    @classmethod
+    def plot_convergence(cls, x_array, y_array, xlabel, ylabel, f_height=1, f_width=1, out_dir=None, file_name=None, out_fmt='.png'):
+        
+        fig, ax = plt.subplots(figsize=(cls.fig_width*f_width, cls.fig_height*f_height), dpi=200)
+        
+        if isinstance(y_array, dict):
+            for i, (label, y) in enumerate(y_array.items()):
+                #col_idx = np.remainder(i, len(cls.line_colors))
+                ax.plot(x_array, y, label=label, # label=cls.raw(label), 
+                        #color=cls.line_colors[col_idx],
+                         lw=cls.line_w, marker='x')
+            ax.legend(frameon=True, fontsize=cls.font_size_red, loc='best')
+        else:
+            ax.plot(x_array, y_array, marker='x', color='blue', lw=1.5)
+        ax.set_xlabel(xlabel, fontsize=cls.font_size)
+        ax.set_ylabel(ylabel, fontsize=cls.font_size)
+        #ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.8)
+        
+        fig.tight_layout()
+        fig.show()
+        
+        if file_name is not None:
+            out_dir = out_dir if out_dir is not None else './' 
+            os.makedirs(out_dir, exist_ok=True)       
+            fig.savefig(os.path.join(out_dir,file_name+out_fmt), dpi=600, bbox_inches='tight')
         
 
 
     @classmethod
     def plot_geo_data(cls, data, lon_edges_vec, lat_edges_vec, data_label='',
                       f_height=1, f_width=1, 
-                      out_dir=None, file_name=None, title=None, out_fmt='.png', draw_grid=False):
+                      out_dir=None, file_name=None, title=None, out_fmt='.png', draw_grid=False, max_mag=None):
         
         fig, ax = plt.subplots(figsize=(2 * cls.fig_width*f_width, cls.fig_height*f_height), dpi=200)
-        max_abs = np.max(np.abs(data))
+        max_abs = np.nanmax(np.abs(data)) if max_mag is None else max_mag
         norm = colors.TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
         
         #cmap = plt.get_cmap("plasma")

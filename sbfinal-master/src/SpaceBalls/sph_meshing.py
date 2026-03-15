@@ -4,6 +4,7 @@ from scipy.spatial import ConvexHull
 from scipy.interpolate import griddata
 from astropy.coordinates import get_body, ITRS, SkyCoord, CartesianRepresentation
 from astropy.coordinates import spherical_to_cartesian, cartesian_to_spherical
+from multiprocessing import Pool
 
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR
 from SpaceBalls.utils import get_two_perp_unit_vectors, progress_bar
@@ -16,6 +17,14 @@ class SphereSurfaceMesh:
 
     def __init__(self, type):
         pass
+
+
+def fit_sh_field(y_vec, lon_vec, lat_vec, lmax):
+    import pyshtools as pysh 
+    
+    sh_set = pysh.SHCoeffs.from_least_squares(data=y_vec, latitude=lat_vec, longitude=lon_vec, lmax=lmax)
+    
+    return sh_set
 
 
 def get_cell_samples_in_regular_grid(lat_hist_vec, lon_hist_vec, x_hist_vec, n_lon=360, n_lat=180):  # TODO: optimize and make it a mehtod of the above classes
@@ -372,7 +381,7 @@ def expand_sh_grid(sh_map, lon_vec, lat_vec):
 
 
 
-def field_hist_rotation(field_hist, R_hist):
+def field_hist_rotation(field_hist, R_hist, transpose_R=False):
     
     n_steps = np.shape(field_hist)[2]
     n_lat, n_lon = np.shape(field_hist)[:2]
@@ -385,11 +394,12 @@ def field_hist_rotation(field_hist, R_hist):
 
     assert(np.shape(R_hist)[0]==n_steps)
     field_hist_newframe = np.zeros((n_lat, n_lon, n_steps))
-    
+    print("Rotating field history to Sun-Fixed frame...")
+
     for i in range(n_steps):
         progress_bar(i, n_steps)
         field_i = field_hist[:,:,i]
-        R_i = R_hist[i,:,:]
+        R_i = np.transpose(R_hist[i,:,:]) if transpose_R else R_hist[i,:,:]
         
         grid_u_el_rot = (R_i @ stacked_grid_u_el.T).T
         _, lat_rot, lon_rot = cartesian_to_spherical(grid_u_el_rot[:,0], grid_u_el_rot[:,1], grid_u_el_rot[:,2])  # astropy
@@ -403,6 +413,62 @@ def field_hist_rotation(field_hist, R_hist):
         field_hist_newframe[:,:,i] = Z_interp.reshape((n_lat, n_lon), order='F')  # seems to be right ...
         
     return field_hist_newframe
+
+
+def field_hist_rotation_multiproc(field_hist, R_hist, transpose_R=False, n_cores=4):
+
+    n_steps = np.shape(field_hist)[2]
+    n_lat, n_lon = np.shape(field_hist)[:2]
+    lon_vec, lat_vec, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
+    
+    grid_r_el = lonlat_to_r(lon_vec, lat_vec, 0, "spherical")
+    stacked_grid_r_el = np.reshape(grid_r_el, (n_lon*n_lat, 3))
+    stacked_grid_u_el = stacked_grid_r_el / (constants.earth_radius(units='km') * np.ones((n_lon*n_lat,1)))
+    
+    assert(np.shape(R_hist)[0]==n_steps)
+    print(f"Rotating field history to Sun-Fixed frame with {n_cores} cores...")
+
+    if transpose_R:
+        R_hist = np.transpose(R_hist, (0,2,1))
+        R_hist_2 = np.array([np.transpose(R_hist[i,:,:]) for i in range(n_steps)])
+        assert((R_hist_2 == R_hist).all())
+
+    args_list = [(field_hist[:,:,i], R_hist[i,:,:]) for i in range(n_steps)]
+    with Pool(processes=n_cores, initializer=init_worker, initargs=(stacked_grid_u_el, lon_vec, lat_vec)) as pool:
+        results = pool.starmap(rotate_field, args_list)
+    
+    return np.stack(results, axis=2)
+
+
+
+_global = {}
+
+def init_worker(stacked_grid_u_el, lon_vec, lat_vec):
+
+    _global['stacked_grid_u_el'] = stacked_grid_u_el
+    _global['lon_vec'] = lon_vec
+    _global['lat_vec'] = lat_vec
+
+
+def rotate_field(field, R_matrix):
+
+    stacked_grid_u_el = _global['stacked_grid_u_el']
+    lon_vec = _global['lon_vec']
+    lat_vec = _global['lat_vec']
+    n_lon, n_lat = len(lon_vec), len(lat_vec)
+
+    grid_u_el_rot = (R_matrix @ stacked_grid_u_el.T).T
+
+    _, lat_rot, lon_rot = cartesian_to_spherical(grid_u_el_rot[:,0], grid_u_el_rot[:,1], grid_u_el_rot[:,2])  # astropy
+    
+    P_i = np.array((lat_rot.degree, lon_rot.degree)).T
+    Z_i = field.reshape(n_lon*n_lat)
+
+    LAT_vec, LON_vec, _ = get_reshaped_grid(lat_vec, lon_vec)
+    Pq = np.array((LAT_vec, LON_vec)).T
+    Z_interp = griddata(P_i, Z_i, Pq, method="linear")  # scipy interpolate
+
+    return Z_interp.reshape((n_lat, n_lon), order='F') 
 
 
 

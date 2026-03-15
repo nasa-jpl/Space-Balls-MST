@@ -31,10 +31,11 @@ def get_two_perp_unit_vectors(u):
 
 def progress_bar(i, n, length=40):
     """Efficient inline progress bar."""
-    frac = i / (n-1)
-    filled = int(length * frac)
-    bar = '█' * filled + '-' * (length - filled)
-    print(f'\r[{bar}] {100*frac:6.2f}%', end='', file=sys.stdout)
+    if n>1: 
+        frac = i / (n-1)
+        filled = int(length * frac)
+        bar = '█' * filled + '-' * (length - filled)
+        print(f'\r[{bar}] {100*frac:6.2f}%', end='', file=sys.stdout)
     if i == n-1:
         print()  # newline at the end
 

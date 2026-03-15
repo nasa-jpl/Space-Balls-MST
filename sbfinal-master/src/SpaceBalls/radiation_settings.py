@@ -142,7 +142,8 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["sh_mode"] = "historic_SYN1deg"
         rad_config_dict["Nmax"] = 45
         rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
-        rad_config_dict["ephemerides"] = "boa_0"    
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"    
         # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
         
     else:

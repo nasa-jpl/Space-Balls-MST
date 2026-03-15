@@ -16,7 +16,7 @@ from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR, INPUT_DIR, OUTPUT_DIR
 from SpaceBalls.radiation_settings import radiation_settings_from_EEI_truth_name
 from SpaceBalls.radiation_fluxes_preprocessing import get_R_SunFrame_hist, get_cos_theta_s_lim
 from SpaceBalls.utils import load_input_file, progress_bar, normal_smoother, interp_zeroes_in_2D_data_array, compute_orbital_period, make_list_str_key, get_rolling_jd_windows, get_2D_to_1D_idx
-from SpaceBalls.sph_meshing import get_sphere_grid, get_spherical_grid_cell_areas, get_reshaped_grid
+from SpaceBalls.sph_meshing import get_sphere_grid, get_spherical_grid_cell_areas, get_reshaped_grid, lonlat_to_r, fit_sh_field
 import config.constants as constants
 from SpaceBalls.plotter import Plotter
 
@@ -49,8 +49,39 @@ def read_data(case, sc_names): # TODO: case is now "case_5_years", to be replace
     aero_acc_hist_array = get_full_output_var_hist(input_names, 'aero')
     srp_acc_hist_array = get_full_output_var_hist(input_names, 'srp')
     erp_acc_hist_array = get_full_output_var_hist(input_names, 'erp')
-    
 
+
+def estimate_EEI_avg_sh(case, sc_names, altitude, jd_windows, frame, lmax, make_plots=False, return_mode='EEI_avg'):
+
+    Re = constants.earth_radius(units='km')
+    input_names = [case + '_' + sc_name for sc_name in sc_names]
+    jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
+    first_last_idxs = [get_jd_window_idxs(jd_hist, jd_windows) for jd_hist in jd_hist_array]
+
+    EEI_avg_array = np.zeros(len(jd_windows))
+    sh_coeffs_array = [None] * len(jd_windows)
+
+    for i, jd_window in enumerate(jd_windows):
+        all_h_lat_lon_hist = np.concatenate([array[first_last_idxs[j][i][0]:first_last_idxs[j][i][1]] 
+                                             for j, array in enumerate(get_h_lat_lon_hist_array(input_names, frame))])
+        
+        all_radial_measurements = np.concatenate([array[first_last_idxs[j][i][0]:first_last_idxs[j][i][1]] 
+                                             for j, array in enumerate(get_radial_measurements_array(input_names, 'flux'))])
+    
+        print("Fitting SH map...")
+        t1 = time.time()
+        sh_coeffs = fit_sh_field(all_radial_measurements, all_h_lat_lon_hist[:,2], all_h_lat_lon_hist[:,1], lmax=lmax)
+        t2 = time.time()
+        print(f"Time to fit SH field: {t2-t1}")
+        
+        sh_coeffs_array[i] = sh_coeffs
+        EEI_avg_array[i] = sh_coeffs.coeffs[0, 0, 0] * (Re + altitude)**2 / Re**2
+
+    if return_mode=='EEI_avg':
+        return EEI_avg_array
+    elif return_mode=='sh_objects':
+        return sh_coeffs_array
+    
 
 def estimate_EEI_avg(case, sc_names, altitude, jd_windows, n_lon, n_lat, frame, fill_method='zeroes', make_plots=False):
 
@@ -86,21 +117,31 @@ def estimate_EEI_avg(case, sc_names, altitude, jd_windows, n_lon, n_lat, frame, 
     return EEI_avg
 
 
+def get_h_lat_lon_hist_array(input_names, frame):
+
+    if frame=="ECEF":
+        return get_full_output_var_hist(input_names, 'h_lat_lon')
+    elif frame=="SFF":
+        return get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
+    else:
+        print("frame has to be either ECEF or SFF")
+
 
 
 def get_radial_measurement_arrays(input_names, n_lon=360, n_lat=180, frame='ECEF', meas='flux', mode='3D'):  # frame: "ECEF" or "SFF"
 
     _ = check_EEI_consistency(input_names)
 
-    if frame=="ECEF":
-        h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon')
-    elif frame=="SFF":
-        h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
+    #if frame=="ECEF":
+    #    h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon')
+    #elif frame=="SFF":
+    #    h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
+    h_lat_lon_hist_array = get_h_lat_lon_hist_array(input_names, frame)
 
     # build 3D measurement arrays:
     all_radial_measurement_arrays = get_radial_measurements_array(input_names, meas)
 
-    for sc_i in range(len(input_names)):
+    for sc_i in range(len(input_names)): # we want to keep individual S/C arrays separate for windowing later (third axis is time axis and each satellite might have it different)
         
         radial_meas_hist = all_radial_measurement_arrays[sc_i]
         lat_hist, lon_hist = h_lat_lon_hist_array[sc_i][:,1], h_lat_lon_hist_array[sc_i][:,2]
@@ -444,15 +485,25 @@ def getnnz(sparse_array, axis):
     
     return nnz_array
 
+def get_latlon_cell_idxs(lat_hist_vec, lon_hist_vec, n_lon, n_lat):
+
+    _, _, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
+
+    lat_cell_numbers = np.searchsorted(-lat_edges_vec, -lat_hist_vec) - 1
+    lon_cell_numbers = np.searchsorted(lon_edges_vec, lon_hist_vec) - 1
+
+    return lat_cell_numbers, lon_cell_numbers
+
 
 def get_stacked_measurements_matrix_regular_grid(n_lon, n_lat, lon_hist_vec, lat_hist_vec, meas_hist_vec, out_mode='3D'):
 
     n_steps = len(lat_hist_vec)
     assert(n_steps == len(lon_hist_vec) == len(meas_hist_vec))
-    _, _, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-
-    lat_cell_numbers = np.searchsorted(-lat_edges_vec, -lat_hist_vec) - 1
-    lon_cell_numbers = np.searchsorted(lon_edges_vec, lon_hist_vec) - 1
+    # _, _, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
+    # 
+    # lat_cell_numbers = np.searchsorted(-lat_edges_vec, -lat_hist_vec) - 1
+    # lon_cell_numbers = np.searchsorted(lon_edges_vec, lon_hist_vec) - 1
+    lat_cell_numbers, lon_cell_numbers = get_latlon_cell_idxs(lat_hist_vec, lon_hist_vec, n_lon, n_lat)
 
     if out_mode=="3D":
         full_3D_array = scipy.sparse.coo_array( # omg that's hella fast
@@ -702,6 +753,7 @@ def get_n_days_EEI_truth(EEI_name):
 
 def get_full_output_var_hist(case_names, var_name, n_days=None):
 
+    # TODO: n_days should not really be an input
     if n_days is None:
         n_days, completed_bool = get_n_days_max(case_names)
 
@@ -889,8 +941,55 @@ def compute_rolling_avg_error_time_series(sc_array, window_days, EEI_truth_time_
 
 
 def compute_sample_quality_metrics(constellation_list):
-    pass
-        
+
+    input_names = ['case_5_years_' + sc_name for sc_name in constellation_list]
+
+    grid_deg_spacing = 1  # TODO: make flexible
+    n_lon = int(360/grid_deg_spacing)
+    n_lat = int(180/grid_deg_spacing)
+
+    lon_vec, lat_vec, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
+    alt = 800 # TODO: read from sc input files
+    r_grid = lonlat_to_r(lon_vec, lat_vec, alt, "spherical")
+
+
+    h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon')
+    lat_hist = np.concatenate([hist[:,1] for hist in h_lat_lon_hist_array])
+    lon_hist = np.concatenate([hist[:,2] for hist in h_lat_lon_hist_array])
+    n_steps = len(lat_hist)
+
+    lat_idxs, lon_idxs = get_latlon_cell_idxs(lat_hist, lon_hist, n_lon, n_lat)
+
+    full_r_ecef_hist_array = np.concatenate(get_full_output_var_hist(input_names, 'xyz_ecef'))
+
+    r_offsets = full_r_ecef_hist_array - r_grid[lat_idxs, lon_idxs, :]
+
+    x_offsets_avg_map = scipy.sparse.coo_array(
+            (r_offsets[:,0], (lat_idxs, lon_idxs, np.arange(n_steps))),
+            shape=(n_lat, n_lon, n_steps)
+        ).mean(axis=2)
+    
+    y_offsets_avg_map = scipy.sparse.coo_array(
+            (r_offsets[:,1], (lat_idxs, lon_idxs, np.arange(n_steps))),
+            shape=(n_lat, n_lon, n_steps)
+        ).mean(axis=2)
+    
+    z_offsets_avg_map = scipy.sparse.coo_array(
+            (r_offsets[:,2], (lat_idxs, lon_idxs, np.arange(n_steps))),
+            shape=(n_lat, n_lon, n_steps)
+        ).mean(axis=2)
+    
+    r_offsets_avg_map = np.stack((x_offsets_avg_map, y_offsets_avg_map, z_offsets_avg_map), axis=2)
+    offset_norms_avg_map = np.linalg.norm(r_offsets_avg_map, axis=2)
+
+    print("done")
+
+
+
+    h_lat_lon_SFF_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
+    r_sff_hist_array = get_full_output_var_hist(input_names, 'xyz_sun_frame')
+    
+
 
 
 if __name__ == "__main__":
@@ -898,7 +997,7 @@ if __name__ == "__main__":
     #read_data('case_5_years', sc_names=['sc_C1', 'sc_C2', 'sc_C3'])
     t1 = time.time()
     EEI_avg = estimate_EEI_avg('case_5_years', sc_names=['sc_C1', 'sc_C2', 'sc_C3'], 
-                               altitude=800, jd_windows=[[2458119.5, 2459945.5]], 
+                               altitude=800, jd_windows=[[2458119.5, 2458119.5+365]], 
                      n_lon=360, n_lat=180, frame="SFF")
     t2 = time.time()
     print(f"Full time to compute EEI: {t2-t1}")

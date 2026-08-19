@@ -29,8 +29,16 @@ def get_TSI_1AU(jD, TSI_source):
     elif TSI_source=="CERES":
         TSI_mat = np.loadtxt(os.path.join(CONFIG_DIR, 'TSI', 'TSI_CERES.txt'), delimiter=',') # col 1: jd; col 2: TSI_1AU
         jd_vec = np.array(TSI_mat[:, 0])
-        idx = np.where(jd_vec==jD)
-        solar_energy_1AU = TSI_mat[idx, 1][0][0]
+        #idx = np.where(jd_vec==jD)
+        solar_energy_1AU = np.interp(jD, jd_vec, TSI_mat[:,1]) # TSI_mat[idx, 1][0][0]
+
+        return solar_energy_1AU
+    
+    elif TSI_source=="constant":
+        TSI_mat = np.load(os.path.join(CONFIG_DIR, 'TSI', 'constant.npy')) # col 1: jd; col 2: TSI_1AU
+        jd_vec = np.array(TSI_mat[:, 0])
+        #idx = np.where(jd_vec==jD)
+        solar_energy_1AU = np.interp(jD, jd_vec, TSI_mat[:,1]) # TSI_mat[idx, 1][0][0]
         
         return solar_energy_1AU
     
@@ -124,6 +132,12 @@ def get_ae_sh_maps_numpy_new(mode, date):
 
     if mode=="historic_SYN1deg":
         source = 'SYN1deg_2018_2022'
+    elif mode=="SYN1deg_fine":
+        source = 'SYN1deg_l179'
+    elif mode=="flat":
+        source = 'flat_coeffs'
+        date = ''
+
 
     dir = os.path.join(CONFIG_DIR, 'earth', 'albedo_and_thermal', source, 'numpy_format')
     albedo_array = np.load(os.path.join(dir, 'Albedo_' + date + '.npy'))
@@ -136,11 +150,90 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
 
     rad_config_dict = {}
 
-    if EEI_truth_name=="EEI_truth_1":
+    if EEI_truth_name=="EEI_truth_0":
+        rad_config_dict["TSI_source"] = "constant"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "flat"
+        rad_config_dict["sh_normalization"] = "unnorm"
+        rad_config_dict["Nmax"] = 2
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "fully_circular"
+        rad_config_dict["earth_shape"] = "spherical"    
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+
+    elif EEI_truth_name=="EEI_truth_1":
         rad_config_dict["TSI_source"] = "CERES"
         rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
         rad_config_dict["sh_mode"] = "historic_SYN1deg"
+        rad_config_dict["sh_normalization"] = "unnorm"
         rad_config_dict["Nmax"] = 45
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"    
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+    
+    elif EEI_truth_name=="EEI_truth_100":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Albedo"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "historic_SYN1deg"
+        rad_config_dict["sh_normalization"] = "unnorm"
+        rad_config_dict["Nmax"] = 45
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"    
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+    
+    elif EEI_truth_name=="EEI_truth_101":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "historic_SYN1deg"
+        rad_config_dict["sh_normalization"] = "unnorm"
+        rad_config_dict["Nmax"] = 45
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"    
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+    
+    elif EEI_truth_name=="EEI_truth_11":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "historic_SYN1deg"
+        rad_config_dict["sh_normalization"] = "unnorm"
+        rad_config_dict["Nmax"] = 50
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"    
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+    
+    elif EEI_truth_name=="EEI_truth_110":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Albedo"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "historic_SYN1deg"
+        rad_config_dict["sh_normalization"] = "unnorm"
+        rad_config_dict["Nmax"] = 50
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"    
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+    
+    elif EEI_truth_name=="EEI_truth_111":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "historic_SYN1deg"
+        rad_config_dict["sh_normalization"] = "unnorm"
+        rad_config_dict["Nmax"] = 50
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"    
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+
+
+    elif EEI_truth_name=="EEI_truth_2":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "SYN1deg_fine"
+        rad_config_dict["sh_normalization"] = "4pi"
+        rad_config_dict["Nmax"] = 179
         rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
         rad_config_dict["ephemerides"] = "boa_0"
         rad_config_dict["earth_shape"] = "spherical"    
@@ -150,3 +243,10 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         print(f"{EEI_truth_name} not recognized!")
 
     return rad_config_dict
+
+
+def get_n_days_EEI_truth(EEI_name):
+    EEI_settings = radiation_settings_from_EEI_truth_name(EEI_name)
+    total_n_days = int(np.diff(EEI_settings['jd_interval']).item())
+
+    return total_n_days

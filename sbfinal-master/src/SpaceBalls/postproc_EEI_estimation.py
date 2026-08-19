@@ -1,292 +1,450 @@
 import os, sys
-import importlib.util
 import time
 
-print("PYTHON:", sys.executable)
-print("LD_LIBRARY_PATH:", os.environ.get("LD_LIBRARY_PATH"))
-print("CONDA_PREFIX:", os.environ.get("CONDA_PREFIX"))
-
-# from importlib import spec_from_file_location
 import numpy as np
 import scipy.sparse
+import scipy.spatial
 import astropy.coordinates as coord
+from astropy.time import Time, TimeDelta
 import astropy.units as u
+import copy
 
-from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR, INPUT_DIR, OUTPUT_DIR
-from SpaceBalls.radiation_settings import radiation_settings_from_EEI_truth_name
-from SpaceBalls.radiation_fluxes_preprocessing import get_R_SunFrame_hist, get_cos_theta_s_lim
-from SpaceBalls.utils import load_input_file, progress_bar, normal_smoother, interp_zeroes_in_2D_data_array, compute_orbital_period, make_list_str_key, get_rolling_jd_windows, get_2D_to_1D_idx
-from SpaceBalls.sph_meshing import get_sphere_grid, get_spherical_grid_cell_areas, get_reshaped_grid, lonlat_to_r, fit_sh_field
+from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR, INPUT_DIR, OUTPUT_DIR, PROJECT_ROOT
+from SpaceBalls.radiation_settings import radiation_settings_from_EEI_truth_name, get_n_days_EEI_truth, get_TSI_1AU
+from SpaceBalls.radiation_fluxes_preprocessing import get_R_SunFrame_hist, get_cos_theta_s_lim, get_subdir_EEI_truth, get_EEI_truth_daily_jd_arrays, mid_day_jd_array_from_jd_interval, get_window_avg_maps
+from SpaceBalls.utils import load_input_file, progress_bar, normal_smoother, interp_zeroes_in_2D_data_array, compute_orbital_period, make_list_str_key, get_rolling_jd_windows, get_2D_to_1D_idx, find_idxs, fit_cos_sin_fixed_freq, notch_filter
+from SpaceBalls.sph_meshing import Grid, QuadratureGrid, RegularLatLonGrid, fit_sh_field, interp_zeroes_in_grid_data
+import SpaceBalls.input_database_manager as input_manager
 import config.constants as constants
 from SpaceBalls.plotter import Plotter
+from SpaceBalls.utils import nanrms, generate_noise_time_series, downsample_array
 
 AU = constants.astronomical_unit(units='km')
 RE = constants.earth_radius(units='km')
+TOA_S = 4*np.pi*RE**2      # TOA surface area in km2
+LIGHT_SPEED = constants.light_speed(units='m/s')
 
-OUTPUT_VARS = ['jd_vec', 'aero', 'erp', 'srp', 'total_grav', 'xyz_ecef', 'xyz_sun_frame']
+OUTPUT_VARS = ['jd_vec', 'aero', 'erp', 'srp', 'total_grav', 'xyz_ecef', 'xyz_sun_frame',
+               'erp_recomp_radial', 'srp_recomp_radial', 
+               'erp_recomp_radial_131',
+               'srp_recomp_radial_225', 'erp_recomp_radial_225',
+               'srp_recomp_radial_2Hz', 'erp_recomp_radial_131_2Hz',
+               'srp_recomp_radial_EEI_truth_0', 'erp_recomp_radial_131_EEI_truth_0',
+               'error_time_series']
 ANIMATIONS_DIR = os.path.join(MEDIA_DIR, 'animations')
 
-#sys.path.insert(0, str(INPUT_DIR.parent))  # parent of 'config'
-
-
-
-def read_data(case, sc_names): # TODO: case is now "case_5_years", to be replaced with "case_EEI_1"
+def read_data(sb_names):
 
     # NOTE: the contents of this function are just for the sake of testing
-    input_names = [case + '_' + sc_name for sc_name in sc_names]
-    EEI_name = check_EEI_consistency(input_names)
+    EEI_name = check_EEI_consistency(sb_names)
     EEI_settings = radiation_settings_from_EEI_truth_name(EEI_name)
     EEI_time_series = get_true_EEI_time_series(EEI_name, 360, 180)
 
-    acc_to_flux_factors = [get_acc_to_flux_factor(sc) for sc in input_names]
+    acc_to_flux_factors = [get_acc_to_flux_factor(sc) for sc in sb_names]
 
-    jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
-    h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon')
-    h_lat_lon_SFF_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
-    r_ecef_hist_array = get_full_output_var_hist(input_names, 'xyz_ecef')
-    r_sff_hist_array = get_full_output_var_hist(input_names, 'xyz_sun_frame')
+    jd_hist_array = get_full_output_var_hist(sb_names, 'jd_vec')
+    h_lat_lon_hist_array = get_full_output_var_hist(sb_names, 'h_lat_lon')
+    h_lat_lon_SFF_hist_array = get_full_output_var_hist(sb_names, 'h_lat_lon_SFF')
+    r_ecef_hist_array = get_full_output_var_hist(sb_names, 'xyz_ecef')
+    r_sff_hist_array = get_full_output_var_hist(sb_names, 'xyz_sun_frame')
 
-    aero_acc_hist_array = get_full_output_var_hist(input_names, 'aero')
-    srp_acc_hist_array = get_full_output_var_hist(input_names, 'srp')
-    erp_acc_hist_array = get_full_output_var_hist(input_names, 'erp')
+    aero_acc_hist_array = get_full_output_var_hist(sb_names, 'aero')
+    srp_acc_hist_array = get_full_output_var_hist(sb_names, 'srp')
+    erp_acc_hist_array = get_full_output_var_hist(sb_names, 'erp')
 
 
-def estimate_EEI_avg_sh(case, sc_names, altitude, jd_windows, frame, lmax, make_plots=False, return_mode='EEI_avg'):
-
-    Re = constants.earth_radius(units='km')
-    input_names = [case + '_' + sc_name for sc_name in sc_names]
-    jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
-    first_last_idxs = [get_jd_window_idxs(jd_hist, jd_windows) for jd_hist in jd_hist_array]
-
-    EEI_avg_array = np.zeros(len(jd_windows))
-    sh_coeffs_array = [None] * len(jd_windows)
-
-    for i, jd_window in enumerate(jd_windows):
-        all_h_lat_lon_hist = np.concatenate([array[first_last_idxs[j][i][0]:first_last_idxs[j][i][1]] 
-                                             for j, array in enumerate(get_h_lat_lon_hist_array(input_names, frame))])
-        
-        all_radial_measurements = np.concatenate([array[first_last_idxs[j][i][0]:first_last_idxs[j][i][1]] 
-                                             for j, array in enumerate(get_radial_measurements_array(input_names, 'flux'))])
+def estimate_EEI_avg(sb_names, jd_windows, grid: Grid, frame, method='binary_gridding', 
+                     fill_zeroes_method='theta_s_fit_simplified', avg_method='numeric_integral', 
+                     meas_mode="monte", make_plots=False, return_avg_flux_maps=False, accelerometer_dict=dict()):
     
-        print("Fitting SH map...")
-        t1 = time.time()
-        sh_coeffs = fit_sh_field(all_radial_measurements, all_h_lat_lon_hist[:,2], all_h_lat_lon_hist[:,1], lmax=lmax)
-        t2 = time.time()
-        print(f"Time to fit SH field: {t2-t1}")
-        
-        sh_coeffs_array[i] = sh_coeffs
-        EEI_avg_array[i] = sh_coeffs.coeffs[0, 0, 0] * (Re + altitude)**2 / Re**2
-
-    if return_mode=='EEI_avg':
-        return EEI_avg_array
-    elif return_mode=='sh_objects':
-        return sh_coeffs_array
-    
-
-def estimate_EEI_avg(case, sc_names, altitude, jd_windows, n_lon, n_lat, frame, fill_method='zeroes', make_plots=False):
-
-    if fill_method=="theta_s_fit": assert(frame=="SFF")
-    
-    input_names = [case + '_' + sc_name for sc_name in sc_names]
-    jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
-
-    ## old method:
-    # radial_flux_meas_3D_arrays = get_radial_measurement_arrays(input_names, n_lon, n_lat, frame, meas='flux', mode='3D') # this step takes significantly longer
-    # avg_flux_maps = get_stacked_avg_maps_3D_mode(jd_windows, jd_hist_array, radial_flux_meas_3D_arrays) # this comes wiht unobserved cells
-
-    ## new method - verified to give the same result and 20-25% faster
-    radial_flux_meas_2D_arrays = get_radial_measurement_arrays(input_names, n_lon, n_lat, frame, meas='flux', mode='2D') # this step takes significantly longer
-    avg_flux_maps_stretched = get_stacked_avg_maps_2D_mode(jd_windows, jd_hist_array, radial_flux_meas_2D_arrays) # this comes wiht unobserved cells
-    avg_flux_maps = [np.reshape(map_i, (n_lat,n_lon)) for map_i in avg_flux_maps_stretched]
-
-
-    if fill_method=="theta_s_fit_simplified":
-        avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_flux_maps, get_cos_theta_s_lim(altitude), 
-                                                                                    [make_plots]*len(avg_flux_maps))
-    elif fill_method=="theta_s_fit_accurate":                                  
-        avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_accurate(input_names, avg_flux_maps, jd_windows, 
-                                                                                  get_cos_theta_s_lim(altitude), [make_plots]*len(avg_flux_maps))
-    else:
-        avg_flux_maps = fill_unobserved_cells_map_array(avg_flux_maps, fill_method)
-
-
-    #avg_flux_maps = fill_unobserved_cells_map_array(input_names, avg_flux_maps, jd_windows, fill_method, altitude)
-
-    EEI_avg = compute_avg_EEI_from_avg_maps(avg_flux_maps, altitude)
-
-    return EEI_avg
-
-
-def get_h_lat_lon_hist_array(input_names, frame):
-
     if frame=="ECEF":
-        return get_full_output_var_hist(input_names, 'h_lat_lon')
-    elif frame=="SFF":
-        return get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
+        print("ECEF stacking frame - changing fill_zeroes_method to nearest")
+        fill_zeroes_method = 'nearest'
+
+    # METHODS:
+    #  - binary_gridding -> required fill_method (zeroes, theta_s_fit_simplified (default), theta_s_fit_accurate)
+    #  - gaussian weighting # TBC
+
+    n_batches = 1 if method=="binary_gridding" else 5  # TODO: estimate actual memory usage
+    jd_windows_split = np.array_split(jd_windows, n_batches)
+
+    estimated_EEI_series = [None] * n_batches
+    if return_avg_flux_maps: estimated_maps = [None] * n_batches 
+
+    for batch_i, jd_windows in enumerate(jd_windows_split):
+        print(f"Computing batch {batch_i}")
+
+        #if method=="binary_gridding": # every measurement is either inside a grid cell or not. No weights applied
+        jd_hist_array = get_full_output_var_hist(sb_names, 'jd_vec', jd_windows=jd_windows, 
+                                                 downsample_dt=accelerometer_dict.get('subsample_dt'))
+        
+        radial_flux_meas_arrays, meas_weight_arrays = get_radial_measurement_arrays(
+            sb_names, grid, method, frame, meas='flux', jd_windows=jd_windows, meas_mode=meas_mode, accelerometer_dict=accelerometer_dict) # sparse arrays
+        
+        avg_flux_maps = get_stacked_avg_maps_new(jd_windows, jd_hist_array, radial_flux_meas_arrays, meas_weight_arrays) # streteched (column for all grid points)
+
+        del(radial_flux_meas_arrays, meas_weight_arrays)
+        
+        # NOTE: the following version avoids looping over individual satellites but it's not more efficient (at least with <=10 sats.)
+        # avg_flux_maps_2 = get_stacked_avg_maps_new_2(jd_windows, jd_hist_array, radial_flux_meas_arrays) # streteched (column for all grid points)
+        
+        # NOTE 2: the old function below has been checked to give the same result as the new one within numerical precision
+        # avg_flux_maps_old = get_stacked_avg_maps(jd_windows, jd_hist_array, radial_flux_meas_arrays) # streteched (column for all grid points)
+        
+        if fill_zeroes_method=="theta_s_fit_simplified":
+            avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_flux_maps, grid, 
+                                                                                        [make_plots]*len(avg_flux_maps))
+        elif fill_zeroes_method=="theta_s_fit_accurate":                                  
+            avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_accurate(sb_names, avg_flux_maps, jd_windows, 
+                                                                                    grid, [make_plots]*len(avg_flux_maps))
+        else:
+            avg_flux_maps = fill_unobserved_cells_map_array(avg_flux_maps, grid, fill_zeroes_method)
+        if return_avg_flux_maps: 
+            estimated_maps[batch_i] = avg_flux_maps
+        
+        estimated_EEI_series[batch_i] = compute_avg_EEI_from_avg_maps(avg_flux_maps, grid, method=avg_method)
+    
+    if return_avg_flux_maps:
+        return np.concatenate(estimated_EEI_series), np.vstack(estimated_maps)
     else:
-        print("frame has to be either ECEF or SFF")
+        return np.concatenate(estimated_EEI_series)
 
 
 
-def get_radial_measurement_arrays(input_names, n_lon=360, n_lat=180, frame='ECEF', meas='flux', mode='3D'):  # frame: "ECEF" or "SFF"
+def estimate_EEI_avg_single_batch(sb_names, jd_windows, grid: Grid, frame, method='binary_gridding', 
+                     fill_zeroes_method='theta_s_fit_simplified', avg_method='numeric_integral', 
+                     make_plots=False):
+    # METHODS:
+    #  - binary_gridding -> required fill_method (zeroes, theta_s_fit_simplified (default), theta_s_fit_accurate)
+    #  - gaussian weighting # TBC
 
+    jd_hist_array = get_full_output_var_hist(sb_names, 'jd_vec')
+
+    #if method=="binary_gridding": # every measurement is either inside a grid cell or not. No weights applied
+
+    radial_flux_meas_arrays = get_radial_measurement_arrays(sb_names, grid, method, frame, meas='flux') # sparse arrays
+    
+    avg_flux_maps = get_stacked_avg_maps_new(jd_windows, jd_hist_array, radial_flux_meas_arrays) # streteched (column for all grid points)
+    
+    # NOTE: the following version avoids looping over individual satellites but it's not more efficient (at least with <=10 sats.)
+    # avg_flux_maps_2 = get_stacked_avg_maps_new_2(jd_windows, jd_hist_array, radial_flux_meas_arrays) # streteched (column for all grid points)
+    
+    # NOTE 2: the old function below has been checked to give the same result as the new one within numerical precision
+    # avg_flux_maps_old = get_stacked_avg_maps(jd_windows, jd_hist_array, radial_flux_meas_arrays) # streteched (column for all grid points)
+    
+    if fill_zeroes_method=="theta_s_fit_simplified":
+        avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_flux_maps, grid, 
+                                                                                    [make_plots]*len(avg_flux_maps))
+    elif fill_zeroes_method=="theta_s_fit_accurate":                                  
+        avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_accurate(sb_names, avg_flux_maps, jd_windows, 
+                                                                                grid, [make_plots]*len(avg_flux_maps))
+    else:
+        avg_flux_maps = fill_unobserved_cells_map_array(avg_flux_maps, grid, fill_zeroes_method)
+    
+    estimated_EEI_series = compute_avg_EEI_from_avg_maps(avg_flux_maps, grid, method=avg_method)
+
+    return estimated_EEI_series
+
+
+def get_radial_measurement_arrays(input_names, grid: Grid, method, frame='ECEF', meas='flux', 
+                                  jd_windows=None, meas_mode="monte", accelerometer_dict=dict()):  # frame: "ECEF" or "SFF"
+    
+    n_sb = len(input_names)
     _ = check_EEI_consistency(input_names)
-
-    #if frame=="ECEF":
-    #    h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon')
-    #elif frame=="SFF":
-    #    h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
-    h_lat_lon_hist_array = get_h_lat_lon_hist_array(input_names, frame)
+    #h_lat_lon_hist_array = get_h_lat_lon_hist_array(input_names, frame)
+    print(f"Getting r_hist_array...")
+    r_hist_array = get_r_hist_array(input_names, frame, jd_windows, downsample_dt=accelerometer_dict.get('subsample_dt'))
+    
+    #if accelerometer_dict.get('subsample_dt') is not None:
+    #    r_hist_array = [r_hist[:-1,:] for r_hist in r_hist_array] # awful patch! TODO: figure that out...
 
     # build 3D measurement arrays:
-    all_radial_measurement_arrays = get_radial_measurements_array(input_names, meas)
+    all_radial_measurement_arrays = get_radial_measurements_array(input_names, meas, jd_windows, meas_mode, 
+                                                                  accelerometer_dict=accelerometer_dict)
+    #all_radial_measurement_arrays_og = get_radial_measurements_array(input_names, meas, jd_windows, meas_mode="monte")
+    all_sparse_meas_arrays = [None] * n_sb
+    all_sparse_weight_arrays = [None] * n_sb
 
-    for sc_i in range(len(input_names)): # we want to keep individual S/C arrays separate for windowing later (third axis is time axis and each satellite might have it different)
-        
-        radial_meas_hist = all_radial_measurement_arrays[sc_i]
-        lat_hist, lon_hist = h_lat_lon_hist_array[sc_i][:,1], h_lat_lon_hist_array[sc_i][:,2]
+    for sc_i in range(n_sb):
+        print(f"Computing sparse arrays for sc {sc_i}")
+        print(f"Shape all_radial_measurement_arrays[sc_i]: {np.shape(all_radial_measurement_arrays[sc_i])}")
+        print(f"Shape r_hist_array[sc_i]: {np.shape(r_hist_array[sc_i])}")
+        sparse_meas, sparse_weights = get_stacked_measurements_matrix(grid, all_radial_measurement_arrays[sc_i], 
+                                                                       method, r_hist_array=r_hist_array[sc_i])
+        all_sparse_meas_arrays[sc_i] = sparse_meas        
+        all_sparse_weight_arrays[sc_i] = sparse_weights
 
-        all_radial_measurement_arrays[sc_i] = get_stacked_measurements_matrix_regular_grid(
-                                            n_lon, n_lat, lon_hist, lat_hist, radial_meas_hist, out_mode=mode
-                                            )
-    return all_radial_measurement_arrays
+    return all_sparse_meas_arrays, all_sparse_weight_arrays
 
 
-
-def get_radial_measurements_array(input_names, meas):
+def get_radial_measurements_array(input_names, meas, jd_windows=None, meas_mode="monte", accelerometer_dict=dict()):
 
     if meas=="flux":
         conversion_factors = [get_acc_to_flux_factor(sc) for sc in input_names]
     elif meas=="acceleration":
         conversion_factors = [1 for _ in range(len(input_names))]
 
-    acc_meas_hist_array = get_simulated_accelerometer_measurements(input_names)
+    acc_meas_hist_array = get_simulated_accelerometer_measurements(input_names, jd_windows=jd_windows,
+                                                                   meas_mode=meas_mode, accelerometer_dict=accelerometer_dict)
 
     all_radial_measurement_arrays = [None] * len(input_names)
     for sc_i in range(len(input_names)):
         all_radial_measurement_arrays[sc_i] = conversion_factors[sc_i] * acc_meas_hist_array[sc_i][:,0]
+        #if "radial" in meas_mode:
+        #    all_radial_measurement_arrays[sc_i] = conversion_factors[sc_i] * acc_meas_hist_array[sc_i]
+        #else:
+        #    all_radial_measurement_arrays[sc_i] = conversion_factors[sc_i] * acc_meas_hist_array[sc_i][:,0]
     
     return all_radial_measurement_arrays
 
 
+def get_stacked_measurements_matrix(grid: Grid, meas_hist_vec, method, r_hist_array=None, latlon_hist_array=None):
+    n_steps = np.shape(r_hist_array)[0]
+    #assert(n_steps == len(lon_hist_vec) == len(meas_hist_vec))
 
-def are_all_arrays_equal(array_list):
-    stacked = np.stack(array_list)
-    return np.all(stacked == stacked[0])
+    grid_idxs = get_grid_cell_idxs(grid, method, r_hist_array=r_hist_array)
+    if method=="binary_gridding":
+        full_sparse_meas_array = scipy.sparse.coo_array( 
+                (meas_hist_vec, (grid_idxs, np.arange(n_steps))),
+                shape=(grid.n_points, n_steps)
+            )
+        full_sparse_weight_array = full_sparse_meas_array.copy()
+        full_sparse_weight_array.data[:] = 1
+
+    else:
+        
+        # try to build csr instead (transposed):
+        indices = np.concatenate(grid_idxs, dtype=np.uint32, casting='unsafe') # col idxs in csr, row idxs for us
+        counts = np.fromiter((len(idxs) for idxs in grid_idxs), dtype=np.uint32)
+        full_meas_hist = np.repeat(meas_hist_vec, counts)       # same as full_meas_hist = np.concatenate([meas*np.ones_like(idxs_i) for (meas, idxs_i) in zip(meas_hist_vec, grid_idxs)])
+        
+        indptr = np.concatenate([[0], np.cumsum(counts, dtype=np.uint32)])
+        full_sparse_meas_array = scipy.sparse.csr_array(   # csr construction seems faster than coo (x3) and we need it in csr anyway for the convolve function
+            (full_meas_hist, indices, indptr),
+            shape=(n_steps, grid.n_points)
+        ).T
+
+        full_weight_hist = get_weights_sparse_array(grid, r_hist_array, counts, indices, method)
+
+        full_sparse_weight_array = scipy.sparse.csr_array(   # csr construction seems faster than coo (x3) and we need it in csr anyway for the convolve function
+            (full_weight_hist, indices, indptr),
+            shape=(n_steps, grid.n_points)
+        ).T
+    
+    return full_sparse_meas_array, full_sparse_weight_array
 
 
-# currently unused function
-def get_stacked_avg_maps_2D_mode(jd_windows, jd_hist_array, all_2D_measurement_arrays) : #, fill_unobserved_cells_method='zeroes', altitude=None): # method: 'zeroes', 'nearest', 'linear', 'cubic', 'theta_s_interp'
+def get_weights_sparse_array(grid: Grid, r_hist_array, grid_cell_counts, grid_cell_idx_hist, method):
+    
+    full_cos_sph_angle_hist = get_all_cos_sph_angle_relations(grid, r_hist_array, grid_cell_counts, grid_cell_idx_hist)
+
+    if "gaussian" in method:
+        # Gaussian weighting:
+        n_deg_1_sigma = float(method.split("_")[1])
+        a = 1/(1 - np.cos(np.deg2rad(n_deg_1_sigma)))
+        full_weight_hist = np.exp(-a * (1-full_cos_sph_angle_hist))
+    
+    elif "hanning" in method:
+        lim_rad = np.deg2rad(float(method.split("_")[1]))
+        full_sph_angle_hist = np.acos(full_cos_sph_angle_hist)
+        full_weight_hist = 1 + np.cos(np.pi * full_sph_angle_hist / lim_rad)
+
+        full_weight_hist[full_sph_angle_hist>lim_rad] = 0
+
+    return full_weight_hist
+
+def get_all_cos_sph_angle_relations(grid: Grid, r_hist_array, grid_cell_counts, grid_cell_idx_hist):
+
+    u_hist_array = r_hist_array / (np.sqrt(np.einsum('ij,ij->i', r_hist_array, r_hist_array))[:,None])
+    full_u_hist_array = np.repeat(u_hist_array, grid_cell_counts, axis=0)
+    full_cos_sph_angle_hist = np.einsum('ij,ij->i', grid.stacked_grid_u[grid_cell_idx_hist,:], full_u_hist_array)
+
+    return full_cos_sph_angle_hist
+
+
+
+
+def get_grid_cell_idxs(grid: Grid, method, r_hist_array=None, latlon_hist_array=None):
+
+    NN_tree = scipy.spatial.KDTree(grid.stacked_grid_r)
+
+    if method=="binary_gridding": # every measurement is either inside a grid cell or not. No weights applied
+        _, indices = NN_tree.query(r_hist_array)
+        # # NOTE: for regular_latlon grids, the old routine that follows is faster and gives the same (except for a few edge cases)
+        # lat_cell_numbers = np.searchsorted(-grid.lat_edges_vec, -latlon_hist_array[:,0]) - 1
+        # lon_cell_numbers = np.searchsorted(grid.lon_edges_vec, latlon_hist_array[:,1]) - 1
+        # global_idxs = get_2D_to_1D_idx(lat_cell_numbers, lon_cell_numbers, grid.n_lon)
+
+
+    elif "gaussian" in method:
+        n_deg_1_sigma = float(method.split("_")[1])
+        lim_to_store = 2.5 * n_deg_1_sigma    # each measurement will have nonzero weight with all grid elements within a spherical cap 
+                                            # of spherical angle radius equal to n times that of a 1-sigma (exp(-1)) weight
+        straight_line_dist = (RE + grid.alt_km) * np.deg2rad(lim_to_store) # cartesian distance equivalent to such limit (sphere assumed)
+        indices = NN_tree.query_ball_point(r_hist_array, straight_line_dist, workers=4)
+    
+    elif "hanning" in method:
+        lim = float(method.split("_")[1])
+        straight_line_dist = (RE + grid.alt_km) * np.deg2rad(lim*1.05) # cartesian distance equivalent to such limit (sphere assumed)
+        indices = NN_tree.query_ball_point(r_hist_array, straight_line_dist, workers=4)
+    
+    # query_ball_point: Find all points within distance r of point(s) x. (https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.KDTree.html#scipy.spatial.KDTree)
+
+
+    return indices
+    
+    # grid_lats - lat_hist_vec[:,None] is impossible because it would need several hundered GBs of RAM
+    # Haversine formula:
+    # a = np.sin(dlat/2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2.0)**2
+    # c = 2 * np.arcsin(np.sqrt(a))
+    # km = 6378.137 * c
+
+
+def get_stacked_avg_maps_new_2(jd_windows, jd_hist_array, all_2D_measurement_arrays) : #, fill_unobserved_cells_method='zeroes', altitude=None): # method: 'zeroes', 'nearest', 'linear', 'cubic', 'theta_s_interp'
     # each 2D measurement array is n_grid_elements x n_steps
 
     n_sc = len(all_2D_measurement_arrays)
-    n_windows = len(jd_windows)
     
+    #first_last_idxs_array = [None] * n_sc
+    t1 = time.time()
     first_last_idxs_array = [None] * n_sc
 
     for sc_i in range(n_sc):
         jd_vec = jd_hist_array[sc_i]
         first_last_idxs_array[sc_i] = get_jd_window_idxs(jd_vec, jd_windows)    # this is vectorized and single-time computed
-
-    all_meas_avg_maps = [None] * n_windows
-
-    if are_all_arrays_equal(first_last_idxs_array):
-        print("jd_vecs are exactly equal - stacking individual sc arrays")
-        first_last_idxs = first_last_idxs_array[0]
-        stacked_meas_2D_array = scipy.sparse.vstack(all_2D_measurement_arrays) # stacked here means place on top of one another
-
-        for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
-            #progress_bar(window_i, len(jd_windows))
-            first_idx, last_idx = first_last_idxs[window_i,:]
-            all_meas_counts = getnnz(stacked_meas_2D_array[:,first_idx:last_idx], axis=1)
-            all_stacked_meas = stacked_meas_2D_array[:,first_idx:last_idx].sum(axis=1) #stacked as in compressed along time axis but they are still stacked as in the meaning before
-
-            meas_counts_array = np.split(all_meas_counts, n_sc)
-            stacked_measurements_array = np.split(all_stacked_meas, n_sc)
-            all_meas_avg_maps[window_i] = get_meas_avg_map_array(stacked_measurements_array, meas_counts_array)
-
-    else:
-        print("jd_vecs are not equal - looping over individual sc arrays")
-        for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
-            #progress_bar(window_i, len(jd_windows))
-            stacked_measurements_array = [None] * n_sc
-            meas_counts_array = [None] * n_sc
-
-            for sc_i in range(n_sc):
-                first_idx, last_idx = first_last_idxs_array[sc_i][window_i,:]
-
-                meas_counts_array[sc_i] = getnnz(all_2D_measurement_arrays[sc_i][:,first_idx:last_idx], axis=1)
-                stacked_measurements_array[sc_i] = all_2D_measurement_arrays[sc_i][:,first_idx:last_idx].sum(axis=1)
-
-            all_meas_avg_maps[window_i] = get_meas_avg_map_array(stacked_measurements_array, meas_counts_array)
     
-    return all_meas_avg_maps
+    assert( are_all_arrays_equal(first_last_idxs_array) )
 
+    #print("jd_vecs are exactly equal - stacking individual sc arrays")
+    first_last_idxs = first_last_idxs_array[0]
+    stacked_meas_2D_array = scipy.sparse.vstack(all_2D_measurement_arrays) # stacked here means place on top of one another
 
-def get_meas_avg_map_array(stacked_measurements_array, meas_counts_array):
+    all_summed_meas = convolve_A_AI_2(stacked_meas_2D_array, first_last_idxs)
 
-    summed_meas_array = np.sum(stacked_measurements_array, axis=0)
-    summed_counts_array = np.sum(meas_counts_array, axis=0)
-    summed_counts_array[summed_counts_array==0] = 1
+    count_meas = stacked_meas_2D_array.copy()
+    count_meas.data[:] = 1
+    summed_counts = convolve_A_AI_2(count_meas, first_last_idxs)
 
-    return summed_meas_array / summed_counts_array
-
-
-
-def get_stacked_avg_maps_3D_mode(jd_windows, jd_hist_array, all_3D_measurement_arrays) : #, fill_unobserved_cells_method='zeroes', altitude=None): # method: 'zeroes', 'nearest', 'linear', 'cubic', 'theta_s_interp'
-
-    n_sc = len(all_3D_measurement_arrays)
-    n_windows = len(jd_windows)
-    #if fill_unobserved_cells_method=="theta_s_interp": assert(altitude is not None)
+    all_summed_meas = np.split(all_summed_meas, n_sc)
     
-    first_last_idxs_array = [None] * n_sc
+    summed_counts = np.split(summed_counts, n_sc)
+    summed_counts = np.sum(summed_counts, axis=0)
+    summed_counts[summed_counts==0]=1
+    
+    stacked_avg_maps = np.sum(all_summed_meas, axis=0) / summed_counts
+
+    t2 = time.time()
+    print(f"Time with AI suggested function: {t2-t1}")
+
+    return stacked_avg_maps
+
+def get_stacked_avg_maps_new(jd_windows, jd_hist_array, all_2D_measurement_arrays, all_2D_weight_arrays) : #, fill_unobserved_cells_method='zeroes', altitude=None): # method: 'zeroes', 'nearest', 'linear', 'cubic', 'theta_s_interp'
+    # each 2D measurement array is n_grid_elements x n_steps
+
+    n_sc = len(all_2D_measurement_arrays)
+
+    all_summed_meas = [None] * n_sc
+    all_summed_weights = [None] * n_sc
+    
+    t1 = time.time()
 
     for sc_i in range(n_sc):
         jd_vec = jd_hist_array[sc_i]
-        first_last_idxs_array[sc_i] = get_jd_window_idxs(jd_vec, jd_windows)    # this is vectorized and single-time computed
+        first_last_idxs = get_jd_window_idxs(jd_vec, jd_windows)    # this is vectorized and single-time computed
 
-    all_meas_avg_maps = [None] * n_windows
+        weighted_meas_array = all_2D_measurement_arrays[sc_i] * all_2D_weight_arrays[sc_i]
+        all_summed_meas[sc_i] = convolve_A_AI_2(weighted_meas_array, first_last_idxs)
+  
+        #count_meas = sparse_meas_array.copy()
+        #count_meas.data[:] = 1
+        sparse_weights_array = all_2D_weight_arrays[sc_i]
+        all_summed_weights[sc_i] = convolve_A_AI_2(sparse_weights_array, first_last_idxs)
 
-    for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
-        progress_bar(window_i, len(jd_windows))
-        stacked_measurements_array = [None] * n_sc
-        meas_counts_array = [None] * n_sc
 
-        for sc_i in range(n_sc):
-            first_idx, last_idx = first_last_idxs_array[sc_i][window_i,:]
+    summed_weights = np.sum(all_summed_weights, axis=0)
+    summed_weights[np.abs(summed_weights)<1e-8] = 1
+    stacked_avg_maps = np.sum(all_summed_meas, axis=0) / summed_weights
 
-            meas_counts_array[sc_i] = getnnz(all_3D_measurement_arrays[sc_i][:,:,first_idx:last_idx], axis=2)
-            stacked_measurements_array[sc_i] = all_3D_measurement_arrays[sc_i][:,:,first_idx:last_idx].sum(axis=2)
+    t2 = time.time()
+    #print(f"Time with AI suggested function: {t2-t1}")
 
-        summed_meas_array = np.sum(stacked_measurements_array, axis=0)
-        summed_counts_array = np.sum(meas_counts_array, axis=0)
-        summed_counts_array[summed_counts_array==0] = 1
+    return stacked_avg_maps.T
 
-        all_meas_avg_maps[window_i] = summed_meas_array / summed_counts_array
+
+def convolve_A_AI_2(A_in, first_last_idxs):
+    n_p, n_t = A_in.shape
+    first_idx = np.asarray(first_last_idxs[:,0], dtype=np.int64)
+    last_idx = np.asarray(first_last_idxs[:,1], dtype=np.int64)
+    n_out = first_idx.shape[0]
+
+    A_out = np.zeros((n_p, n_out), dtype=A_in.dtype)
+    A_csr = A_in.tocsr()
+
+    # require sorted windows
+    assert np.all(first_idx[:-1] <= first_idx[1:])
+    assert np.all(last_idx[:-1] <= last_idx[1:])
+
+    for i in range(n_p):
+        diff = np.zeros(n_out + 1, dtype=A_in.dtype)
+
+        row_start = A_csr.indptr[i]
+        row_end = A_csr.indptr[i+1]
+        cols = A_csr.indices[row_start:row_end]
+        vals = A_csr.data[row_start:row_end]
+
+        if cols.size == 0:
+            continue
+
+        # windows j with first_idx[j] <= c < last_idx[j]
+        j_max = np.searchsorted(first_idx, cols, side='right') - 1
+        j_min = np.searchsorted(last_idx, cols, side='right')
+
+        valid = j_min <= j_max
+        if not np.any(valid):
+            continue
+
+        np.add.at(diff, j_min[valid], vals[valid])
+        np.add.at(diff, j_max[valid] + 1, -vals[valid])
+
+        A_out[i, :] = np.cumsum(diff[:-1])
+
+    return A_out
+
+
+
+
+def compute_avg_EEI_from_avg_maps(radial_flux_avg_maps, grid: Grid, method="c00_fit"):
+
+    # old:
+    # avg_EEI = np.sum(np.array(radial_flux_avg_maps) * grid_cell_areas_CV[None,:,:], axis=(1,2)) / Earth_S
+
+    if method=="numeric_integral":
+        # NOTE that compute_surf_integral includes weights scaled in km2, hence TOA_S must also be in km2
+        avg_EEI_series = grid.compute_surf_integral(np.array(radial_flux_avg_maps).T) / TOA_S
+
+    elif method=="c00_fit":
+        avg_EEI_series = np.zeros(len(radial_flux_avg_maps))
+        for i, map_i in enumerate(radial_flux_avg_maps):
+            sh_set_i = fit_sh_field(map_i, grid.stacked_grid_latlon[:,1], grid.stacked_grid_latlon[:,0], 50)
+            avg_EEI_series[i] = sh_set_i.coeffs[0, 0, 0] * grid.total_area / TOA_S
+
+    return avg_EEI_series
+
+
+
+def fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_map_array, grid: Grid, make_plot_bool_array=None):
     
-    return all_meas_avg_maps
-
-
-def fill_unobserved_cells_map_array(avg_map_array, method):
-    
+    if make_plot_bool_array is None: make_plot_bool_array = [False] * len(avg_map_array)    
     out_map_array = [None] * len(avg_map_array)
+    #cos_theta_s_lim = get_cos_theta_s_lim(grid.alt_km)
+    
     for i, avg_map in enumerate(avg_map_array):
-        out_map_array[i] = fill_unobserved_cells(avg_map, method)
+        out_map_array[i] = fill_unobserved_cells_with_theta_s_interp(avg_map, grid, make_plots=make_plot_bool_array[i])
 
     return out_map_array
 
 
-def fill_unobserved_cells(avg_map, method):
-
-    if method=="zeroes":
-        return avg_map
-    
-    elif method=='nearest' or method=='linear' or method=='cubic':
-        return interp_zeroes_in_2D_data_array(avg_map, method=method)
-    
-
-# TODO: complete accurate method
-def fill_unobserved_cells_map_array_with_theta_s_fit_accurate(input_names, avg_map_array, jd_windows, cos_theta_s_lim, plots_bool_array):
+def fill_unobserved_cells_map_array_with_theta_s_fit_accurate(input_names, avg_map_array, jd_windows, grid: Grid, plots_bool_array):
 
     # radial_meas_array has been loaded before but this reloading is not looped and this is cleaner
     all_radial_measurement_arrays = get_radial_measurements_array(input_names, 'flux')
@@ -305,53 +463,40 @@ def fill_unobserved_cells_map_array_with_theta_s_fit_accurate(input_names, avg_m
         radial_meas_window = np.concatenate([all_radial_measurement_arrays[j][first_last_idxs_array[j][i][0]:first_last_idxs_array[j][i][1]] for j in range(len(input_names))])
         cos_theta_s_window = np.concatenate([cos_theta_s_hist_array[j][first_last_idxs_array[j][i][0]:first_last_idxs_array[j][i][1]] for j in range(len(input_names))])
 
-        out_map_array[i] = fill_unobserved_cells_with_theta_s_interp_new(avg_map, cos_theta_s_lim, meas_vec_for_fit=radial_meas_window, 
+        out_map_array[i] = fill_unobserved_cells_with_theta_s_interp(avg_map, grid, meas_vec_for_fit=radial_meas_window, 
                                                         cos_theta_s_vec_for_fit=cos_theta_s_window, make_plots=plots_bool_array[i])
-        
-        #c, m, n = compute_meas_vs_cos_theta_s_fit(map_vec[nonzero_idxs], cos_theta_s_vec[nonzero_idxs], 
-        #                                            cos_theta_s_lim, make_plot_bool_array[i])
-        #out_map_array[i] = fill_unobserved_cells_with_theta_s_interp(avg_map, radial_meas_window, cos_theta_s_window, altitude_km)
         
     return out_map_array
 
 
-def fill_unobserved_cells_with_theta_s_interp_new(avg_map, cos_theta_s_lim, meas_vec_for_fit=None, cos_theta_s_vec_for_fit=None, make_plots=False):
+
+def fill_unobserved_cells_with_theta_s_interp(avg_map, grid: Grid, meas_vec_for_fit=None, cos_theta_s_vec_for_fit=None, make_plots=False):
     
+    cos_theta_s_lim = get_cos_theta_s_lim(grid.alt_km)
+
     # NOTE: map MUST be in the Sun-Fixed Frame!
-    n_lat, n_lon = np.shape(avg_map)
-    map_vec = np.reshape(avg_map, n_lat*n_lon)
+    # NOTE 2: avg_map should be one-dimensional
 
-    lon_vec, lat_vec, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-    if make_plots: Plotter.plot_geo_data(avg_map, lon_edges_vec, lat_edges_vec)
+    if make_plots: Plotter.plot_geo_data_new(avg_map, grid=grid)
 
-    lon_vec, lat_vec, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-    LON_vec, LAT_vec, _ = get_reshaped_grid(lon_vec, lat_vec)
+    LON_vec, LAT_vec = grid.stacked_grid_latlon[:,1], grid.stacked_grid_latlon[:,0]
     map_cos_theta_s_vec = -np.cos(np.radians(LAT_vec)) * np.cos(np.radians(LON_vec))  
 
-    zero_idxs, nonzero_idxs = (map_vec==0), (map_vec!=0)
+    #zero_idxs, nonzero_idxs = (avg_map==0), (avg_map!=0)
+    zero_idxs = np.abs(avg_map)<1e-9
+    nonzero_idxs = ~zero_idxs
+
     if meas_vec_for_fit is None and cos_theta_s_vec_for_fit is None:
-        meas_vec_for_fit = map_vec[nonzero_idxs] 
+        meas_vec_for_fit = avg_map[nonzero_idxs]
         cos_theta_s_vec_for_fit = map_cos_theta_s_vec[nonzero_idxs]
 
     c, m, n = compute_meas_vs_cos_theta_s_fit(meas_vec_for_fit, cos_theta_s_vec_for_fit, 
                                                 cos_theta_s_lim, plot_bool=make_plots)
-    map_vec[zero_idxs] = meas_vs_cos_theta_s_function(map_cos_theta_s_vec[zero_idxs], cos_theta_s_lim, c, m, n)
-    filled_map = np.reshape(map_vec, (n_lat, n_lon))
+    avg_map[zero_idxs] = meas_vs_cos_theta_s_function(map_cos_theta_s_vec[zero_idxs], cos_theta_s_lim, c, m, n)
 
-    if make_plots: Plotter.plot_geo_data(filled_map, lon_edges_vec, lat_edges_vec)
+    if make_plots: Plotter.plot_geo_data_new(avg_map, grid=grid)
 
-    return filled_map
-
-
-def fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_map_array, cos_theta_s_lim, make_plot_bool_array=None):
-    
-    if make_plot_bool_array is None: make_plot_bool_array = [False] * len(avg_map_array)    
-    out_map_array = [None] * len(avg_map_array)
-    
-    for i, avg_map in enumerate(avg_map_array):
-        out_map_array[i] = fill_unobserved_cells_with_theta_s_interp_new(avg_map, cos_theta_s_lim, make_plots=make_plot_bool_array[i])
-
-    return out_map_array
+    return avg_map
 
 
 def compute_meas_vs_cos_theta_s_fit(meas_array, cos_theta_s_array, cos_theta_s_lim, cos_theta_s_lim_buffer=0.025, plot_bool=False):
@@ -375,7 +520,6 @@ def compute_meas_vs_cos_theta_s_fit(meas_array, cos_theta_s_array, cos_theta_s_l
 
     return c, m, n
 
-
 def meas_vs_cos_theta_s_function(cos_theta_s, cos_theta_s_lim, c, m, n):
 
     idxs_ct = cos_theta_s <= cos_theta_s_lim
@@ -388,370 +532,203 @@ def meas_vs_cos_theta_s_function(cos_theta_s, cos_theta_s_lim, c, m, n):
     return meas
 
 
-# deprecated function
-def fill_unobserved_cells_with_theta_s_interp(map, obs_array, cos_theta_s_array, altitude_km): 
-    # NOTE: map MUST be in the Sun-Fixed Frame!
-
-    n_lat, n_lon = np.shape(map)
-    lon_vec, lat_vec, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-    LON_vec, LAT_vec, shape = get_reshaped_grid(lon_vec, lat_vec)
-
-    cos_theta_s_lim = get_cos_theta_s_lim(altitude_km)
-    cos_theta_s_vec = -np.cos(np.radians(LAT_vec)) * np.cos(np.radians(LON_vec))  # proof somewhere in my notebook
-    # the minus sign is to match the convention that u_sun points TOWARDS the Sun
-
-    map_vec = np.reshape(map, np.shape(cos_theta_s_vec))
-    idxs_to_keep = (map_vec!=0) & (cos_theta_s_vec>cos_theta_s_lim)
-
-    # check if reshape gives the right stuff
-    Plotter.plot_geo_data(cos_theta_s_vec.reshape((n_lat, n_lon)), lon_edges_vec, lat_edges_vec)
-    Plotter.plot_geo_data(map, lon_edges_vec, lat_edges_vec)
-
-    Plotter.plot_linear_regression(cos_theta_s_vec[idxs_to_keep], map_vec[idxs_to_keep], xlabel='cos theta_s', ylabel='meas. flux')
+def fill_unobserved_cells_map_array(avg_map_array, grid: Grid, method):
     
-    idxs_to_keep = (cos_theta_s_array>cos_theta_s_lim)
-    Plotter.plot_linear_regression(cos_theta_s_array[idxs_to_keep], obs_array[idxs_to_keep], xlabel='cos theta_s', ylabel='meas. flux')
+    out_map_array = [None] * len(avg_map_array)
+    for i, avg_map in enumerate(avg_map_array):
+        out_map_array[i] = fill_unobserved_cells(avg_map, grid, method)
+
+    return out_map_array
+
+
+def fill_unobserved_cells(avg_map, grid: Grid, method):
+
+    if method=="zeroes":
+        return avg_map
     
-    # WE'RE HERE - SPLIT BETWEEN FULL MEAS AND SIMPLIFIED FUNCTIONS, then run the rolling avg estimates
+    elif method=='nearest' or method=='linear' or method=='cubic':
+        #return interp_zeroes_in_2D_data_array(avg_map, method=method)
+        return interp_zeroes_in_grid_data(avg_map, grid, method=method)
 
-    print("checkpoint")
-
-
-
-
+def load_ideal_RIC_acc_meas(input_names, add_drag=True, jd_windows=None, meas_mode="monte"):
     
+    if meas_mode=="monte":
+        srp_acc_tag_end = ''
+        erp_acc_tag_end = ''
+    else:
+        #erp_acc_tag_end = '_recomp_radial_131_EEI_truth_0' #'_' + meas_mode
+        #srp_acc_tag_end = '_recomp_radial_EEI_truth_0' #'_' + rm_toa_order(meas_mode) # TODO!
 
+        erp_acc_tag_end = '_recomp_radial' #'_recomp_radial_131' #'_' + meas_mode
+        srp_acc_tag_end = '_recomp_radial' #'_' + rm_toa_order(meas_mode) # TODO!
 
-
-def get_jd_window_idxs(jd_vec, jd_windows):
+    #elif meas_mode=="recomp_radial":
+    #    rp_acc_tag_end = '_recomp_radial'
+    #    erp_acc_tag_end = '_recomp_radial'
     
-    first_idxs = np.searchsorted(jd_vec, jd_windows[:,0], side="left")
-    last_idxs =  np.searchsorted(jd_vec, jd_windows[:,1], side="right")
-
-    return np.column_stack((first_idxs, last_idxs))
-
-
-def compute_avg_EEI_from_avg_maps(radial_flux_avg_maps, altitude_km):
-
-    n_lat, n_lon = np.unique([np.shape(map) for map in radial_flux_avg_maps])
-
-    _, _, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-    grid_cell_areas_CV = get_spherical_grid_cell_areas(lat_edges_vec, lon_edges_vec,
-                                                        R=(constants.earth_radius(units='km')+altitude_km)*1e3)
-    Earth_S = 4*np.pi*(constants.earth_radius(units='m'))**2
-
-    avg_EEI = np.sum(np.array(radial_flux_avg_maps) * grid_cell_areas_CV[None,:,:], axis=(1,2)) / Earth_S
-
-    return avg_EEI
-    
-
-def compute_avg_EEI_from_avg_map(radial_flux_avg_map, altitude_km):
-
-    n_lat, n_lon = np.shape(radial_flux_avg_map)
-    _, _, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-    grid_cell_areas_CV = get_spherical_grid_cell_areas(lat_edges_vec, lon_edges_vec,
-                                                        R=(constants.earth_radius(units='km')+altitude_km)*1e3)
-    Earth_S = 4*np.pi*(constants.earth_radius(units='m'))**2
-
-    avg_EEI = np.sum(radial_flux_avg_map * grid_cell_areas_CV) / Earth_S
-
-    return avg_EEI
-    
-
-
-def get_simulated_accelerometer_measurements(input_names):
-
-    aero_acc_hist_array = get_full_output_var_hist(input_names, 'aero')
-    srp_acc_hist_array = get_full_output_var_hist(input_names, 'srp')
-    erp_acc_hist_array = get_full_output_var_hist(input_names, 'erp')
+    srp_acc_hist_array = get_full_output_var_hist(input_names, 'srp'+srp_acc_tag_end, jd_windows=jd_windows)
+    erp_acc_hist_array = get_full_output_var_hist(input_names, 'erp'+erp_acc_tag_end, jd_windows=jd_windows)
+    if add_drag:
+        aero_acc_hist_array = get_full_output_var_hist(input_names, 'aero', jd_windows=jd_windows)
+        if "radial" in meas_mode:
+            aero_acc_hist_array = [aero[:,0] for aero in aero_acc_hist_array]
+    else: # TODO: remove zeroes allocation to save RAM
+        aero_acc_hist_array = [np.zeros_like(srp_hist) for srp_hist in srp_acc_hist_array]
 
     acc_meas_hist_array = [None] * len(input_names)
     for sc_i in range(len(input_names)):
         acc_meas_hist_array[sc_i] = (aero_acc_hist_array[sc_i] + srp_acc_hist_array[sc_i] + erp_acc_hist_array[sc_i]) * 1e3 # accelerations are stored in km/s2!
 
-    return acc_meas_hist_array
 
-
-def get_acc_to_flux_factor(input_name):
-    input_file = load_input_file(input_name)
-    return - input_file.SC_INPUT['mass']/input_file.SC_INPUT['area'] * constants.light_speed(units='m/s')
-
+    if "radial" in meas_mode:  # PATCH: we need non-radial measurements for accelerometer errors, but we add them here systematically for consistency
         
-def getnnz(sparse_array, axis):
-
-    # it seems that creating a copy of the sparse array is not needed
-    sparse_array.data[:] = 1
-    nnz_array = sparse_array.sum(axis=axis)
-    
-    return nnz_array
-
-def get_latlon_cell_idxs(lat_hist_vec, lon_hist_vec, n_lon, n_lat):
-
-    _, _, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-
-    lat_cell_numbers = np.searchsorted(-lat_edges_vec, -lat_hist_vec) - 1
-    lon_cell_numbers = np.searchsorted(lon_edges_vec, lon_hist_vec) - 1
-
-    return lat_cell_numbers, lon_cell_numbers
-
-
-def get_stacked_measurements_matrix_regular_grid(n_lon, n_lat, lon_hist_vec, lat_hist_vec, meas_hist_vec, out_mode='3D'):
-
-    n_steps = len(lat_hist_vec)
-    assert(n_steps == len(lon_hist_vec) == len(meas_hist_vec))
-    # _, _, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-    # 
-    # lat_cell_numbers = np.searchsorted(-lat_edges_vec, -lat_hist_vec) - 1
-    # lon_cell_numbers = np.searchsorted(lon_edges_vec, lon_hist_vec) - 1
-    lat_cell_numbers, lon_cell_numbers = get_latlon_cell_idxs(lat_hist_vec, lon_hist_vec, n_lon, n_lat)
-
-    if out_mode=="3D":
-        full_3D_array = scipy.sparse.coo_array( # omg that's hella fast
-            (meas_hist_vec, (lat_cell_numbers, lon_cell_numbers, np.arange(n_steps))),
-            shape=(n_lat, n_lon, n_steps)
-        )
-        return full_3D_array
-    
-    elif out_mode=="2D":
-        global_idxs = get_2D_to_1D_idx(lat_cell_numbers, lon_cell_numbers, n_lon)
-        full_2D_array = scipy.sparse.coo_array( 
-            (meas_hist_vec, (global_idxs, np.arange(n_steps))),
-            shape=(n_lat*n_lon, n_steps)
-        )
-        return full_2D_array
-    
+        # acc_hist_monte = [np.zeros((len(erp), 3)) for erp in erp_acc_hist_array]
+        acc_hist_monte = get_simulated_accelerometer_measurements(input_names, add_drag=True, 
+                                                                    jd_windows=jd_windows, meas_mode="monte")
+        acc_hist_RIC_array = [None] * len(acc_hist_monte)
+        for i, acc_RIC_monte in enumerate(acc_hist_monte):
+            acc_hist_RIC_array[i] = np.hstack((acc_meas_hist_array[i][:,None], acc_RIC_monte[:,1:]))
     else:
-        print("out_mode has to be either 2D or 3D")
+        acc_hist_RIC_array = acc_meas_hist_array
+
+    return acc_hist_RIC_array
 
 
-#def get_stacked_measurements_2D_matrix_regular_grid(n_lon, n_lat, lon_hist_vec, lat_hist_vec, meas_hist_vec):
+def get_simulated_accelerometer_measurements(input_names, add_drag=True, jd_windows=None, meas_mode="monte",
+                                             accelerometer_dict=dict()): # add_noise=False
 
+    acc_hist_RIC_array = load_ideal_RIC_acc_meas(input_names, add_drag, jd_windows, meas_mode)
 
-def get_true_EEI_time_series(EEI_name, n_lon, n_lat):
-    
-    EEI_settings = radiation_settings_from_EEI_truth_name(EEI_name)
-    n_days = get_n_days_EEI_truth(EEI_name)
-    subdir = get_subdir_EEI_truth(EEI_name, n_lon, n_lat, 'daily_hist_net_toa_surf_avg')
+    if accelerometer_dict: # accelerometer_dict is not empty - measurements are not perfect
 
-    full_time_series_fname = os.path.join(subdir, 'concatenated_time_series.npy')
-    if os.path.exists(full_time_series_fname):
-        concatenated_net_toa_time_series = np.load(full_time_series_fname)
-    else:
-        all_net_toa_time_series = [None] * n_days
-        for day_idx in range(n_days):
-            day_fname = os.path.join(subdir, 'day_'+str(day_idx))
-            if os.path.exists(day_fname+'.npy'):
-                all_net_toa_time_series[day_idx] = np.load(day_fname+'.npy')
-            elif os.path.exists(day_fname+'.txt'):
-                all_net_toa_time_series[day_idx] = np.loadtxt(day_fname+'.txt')
+        jd_arrays = get_full_output_var_hist(input_names, 'jd_vec', jd_windows=jd_windows) # pass as input will be more efficient?
+        #assert(jd_arrays is not None)
+        # noise_example = np.load(os.path.join(PROJECT_ROOT, 'notebooks', 'noise_example.npy'))
+        # noise_example[np.isnan(noise_example)] = 0
         
-        concatenated_net_toa_time_series = np.concatenate(all_net_toa_time_series)
-        np.save(full_time_series_fname,concatenated_net_toa_time_series)
+        periods_sec = np.array(get_orbital_periods(input_names)) * 60
+        w = np.array(accelerometer_dict['rotation_revs_per_T'])  * 2 * np.pi / periods_sec
 
-    return concatenated_net_toa_time_series
+        rot_axes_RIC = accelerometer_dict['rotation_axes_RIC']
+        rot_axes_RIC = rot_axes_RIC / np.linalg.norm(rot_axes_RIC, axis=1)[:,None]
 
 
+        for sc_i in range(len(input_names)):
 
-def generate_constellation_stacking_animations(case, sc_names, constellation_tag, n_days, day_0_idx=0, n_lon=360, n_lat=180, frame='SFF'):
+            t_hist_sec = (jd_arrays[sc_i] - jd_arrays[sc_i][0]) * 24 * 3600
+            theta_hist = w[sc_i]* t_hist_sec # TODO: time-variable w?
+            
+            acc_meas_with_errors = add_errors_to_acc_meas(acc_hist_RIC_array[sc_i], t_hist_sec, 
+                                                          theta_hist, rot_axes_RIC[sc_i], 
+                                                          accelerometer_dict['biases'][sc_i],
+                                                          accelerometer_dict['scale_matrices'][sc_i], 
+                                                          accelerometer_dict['noise_asd'])
+            # bias rejection:
+            for j, a_i in enumerate(acc_meas_with_errors.T):
+                A1, A2, y_fit, residual = fit_cos_sin_fixed_freq(t_hist_sec, a_i, w[sc_i])
+                acc_meas_with_errors[:,j] = residual
+
+            # attempt of scale rejection:
+            #for j, a_i in enumerate(acc_meas_with_errors.T):
+            #    y_filtered = notch_filter(t_hist_sec, a_i, f0=w[sc_i]/(2*np.pi), Q=300)
+            #    acc_meas_with_errors[:,j] = y_filtered
+
+            new_meas_dt = accelerometer_dict['subsample_dt']
+            if new_meas_dt is not None:
+                orig_meas_t_array_sec = jd_arrays[sc_i] * 3600 * 24
+                
+                # we're here - check normal smoother for 3D arrays
+                np.save(os.path.join(OUTPUT_DIR, input_names[sc_i], 'raw_acc_meas_with_errors'), acc_meas_with_errors)
+                acc_meas_with_errors = normal_smoother(acc_meas_with_errors.T, orig_meas_t_array_sec, 
+                                                        new_meas_dt, out_length_mode='same_with_nans')
+                np.save(os.path.join(OUTPUT_DIR, input_names[sc_i], 'smooth_acc_meas_with_errors'), acc_meas_with_errors)
+                
+                acc_meas_with_errors = downsample_array(acc_meas_with_errors.T,
+                                                           np.mean(np.diff(orig_meas_t_array_sec)),
+                                                           new_meas_dt)
+                assert(not(np.any(np.isnan(acc_meas_with_errors))))
+                og_meas = downsample_array(acc_hist_RIC_array[sc_i],
+                                          np.mean(np.diff(orig_meas_t_array_sec)),
+                                          new_meas_dt)
+            else:
+                og_meas = acc_hist_RIC_array[sc_i]
+            
+            error_time_series = acc_meas_with_errors - og_meas
+            np.save(os.path.join(OUTPUT_DIR, input_names[sc_i], 'error_time_series'), error_time_series)
+            np.save(os.path.join(OUTPUT_DIR, input_names[sc_i], 'jd_error_time_series'), jd_arrays[sc_i])
+            acc_hist_RIC_array[sc_i] = acc_meas_with_errors
     
-    out_dir = os.path.join(ANIMATIONS_DIR, constellation_tag)
-    os.makedirs(out_dir, exist_ok=True)
+    return acc_hist_RIC_array
+
+
+def add_errors_to_acc_meas(acc_meas_hist, t_hist_sec, theta_hist, rot_axis_RIC, bias_vec, scale_mat, noise_asd_source):
+
+    n_meas = len(t_hist_sec)
+    dt_meas = np.mean(np.diff(t_hist_sec))
     
+    # Euler angle method - tricky (i.e., not commutative hence no unambiguous definition of the pitch, yaw and roll angles)
+    # theta_hist = wz_ABC_RIC[sc_i] * t_hist_sec
+    # rot_hist_ABC2RIC = scipy.spatial.transform.Rotation.from_euler('z', theta_hist[:, None])
 
-    input_names = [case + '_' + sc_name for sc_name in sc_names]
-    EEI_name = check_EEI_consistency(input_names)
-    EEI_full_window = radiation_settings_from_EEI_truth_name(EEI_name)['jd_interval']
-    jd_0 = EEI_full_window[0] + day_0_idx
+    # quaternion method: rotation axis and omega (both constant for now)
+    q4 = np.cos(theta_hist/2)
+    if len(np.shape(rot_axis_RIC))==1: # constant axis
+        q1, q2, q3 = rot_axis_RIC[:,None] * np.sin(theta_hist/2)[None,:]
 
-    jd_window_edges = np.arange(jd_0, jd_0+n_days, 1)
-    jd_windows = np.array([[jd_0, jd+1] for jd in jd_window_edges])
-    mid_day_jd = np.round(jd_window_edges)
-    assert(len(jd_windows)==len(mid_day_jd))
+    elif len(np.shape(rot_axis_RIC))==2: # time history, shape 3 x n_steps
+        q1, q2, q3 = rot_axis_RIC * np.sin(theta_hist/2)[None,:]
 
-    jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
-    T_array = get_orbital_periods(input_names)
+    rot_hist_ABC2RIC = scipy.spatial.transform.Rotation.from_quat(np.stack((q1, q2, q3, q4), axis=1), scalar_first=False)
+    acc_meas_hist_ABC = rot_hist_ABC2RIC.inv().apply(acc_meas_hist).T
 
-    jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
+    _, noise_x = generate_noise_time_series(n_meas, dt_meas, reference_asd=noise_asd_source)
+    _, noise_y = generate_noise_time_series(n_meas, dt_meas, reference_asd=noise_asd_source)
+    _, noise_z = generate_noise_time_series(n_meas, dt_meas, reference_asd=noise_asd_source)
+    noise_vec = np.vstack((noise_x, noise_y, noise_z))
+
+    noised_acc_hist_ABC = acc_meas_hist_ABC + noise_vec + bias_vec[:, None]
+    scaled_noised_acc_hist_ABC = scale_mat @ noised_acc_hist_ABC 
+    scaled_noised_acc_hist_RIC = rot_hist_ABC2RIC.apply(scaled_noised_acc_hist_ABC.T)
+
+    return scaled_noised_acc_hist_RIC
+
+
+
+def get_jd_window_idxs(jd_vec, jd_windows):
+    
+    #first_idxs = np.searchsorted(jd_vec, jd_windows[:,0], side="left")
+    #last_idxs =  np.searchsorted(jd_vec, jd_windows[:,1], side="right")
+
+    first_idxs = np.searchsorted(jd_vec, jd_windows[:,0], side="left")
+    last_idxs =  np.searchsorted(jd_vec, jd_windows[:,1], side="left")
+
+    return np.column_stack((first_idxs, last_idxs))
+
+def are_all_arrays_equal(array_list):
+    stacked = np.stack(array_list)
+    return np.all(stacked == stacked[0])
+
+
+def get_h_lat_lon_hist_array(input_names, frame):  # TODO: add jd_windows and downsample dt arguments
+
     if frame=="ECEF":
-        h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon')
+        return get_full_output_var_hist(input_names, 'h_lat_lon')
     elif frame=="SFF":
-        h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
-        R_hist = np.zeros((len(mid_day_jd),3,3))
-        for day_idx in range(len(mid_day_jd)):
-            R_day_hist = load_day_R_mat_hist(day_idx, EEI_name)
-            R_hist[day_idx, :,:] = R_day_hist[720,:,:]
+        return get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
+    else:
+        print("frame has to be either ECEF or SFF")
+
+def get_r_hist_array(input_names, frame, jd_windows=None, downsample_dt=None):
+
+    if frame=="ECEF":
+        return get_full_output_var_hist(input_names, 'xyz_ecef', jd_windows=jd_windows, downsample_dt=downsample_dt)
+    elif frame=="SFF":
+        return get_full_output_var_hist(input_names, 'xyz_sun_frame', jd_windows=jd_windows, downsample_dt=downsample_dt)
+    else:
+        print("frame has to be either ECEF or SFF")
 
 
-    radial_flux_meas_3D_arrays = get_radial_measurement_arrays(input_names, n_lon, n_lat, frame, meas='flux') # this step takes significantly longer
-    avg_flux_maps = get_stacked_avg_maps_3D_mode(jd_windows, jd_hist_array, radial_flux_meas_3D_arrays) # this comes wiht unobserved cells
-    reshaped_flux_map_array = np.zeros((n_lat, n_lon, len(avg_flux_maps)))
-    for i, map_i in enumerate(avg_flux_maps):
-        reshaped_flux_map_array[:,:,i] = map_i
-
-
-    Plotter.make_map_animation_arbitrary_frame(
-        map_grid_3D_rotated=reshaped_flux_map_array,
-        jd_vec=[window[1] for window in jd_windows],
-        n_lon=n_lon, n_lat=n_lat,
-        data_label='Stacked meas. radial flux (W/m$^2$)',
-        out_dir=out_dir,
-        filename='Stacking_'+str(n_days)+'_days.mp4',
-        sat_h_lat_lon_hist_array=h_lat_lon_hist_array,
-        sat_hist_jd_array=jd_hist_array,
-        orbital_periods_minutes=T_array,
-        add_satellite_positions=False,
-        add_coastlines=False,
-        R_mat_hist=R_hist,
-        groundtrack_linstyle='-'
-    )
-
-
-
-def generate_constellation_day_animations(case, sc_names, constellation_tag, day_idxs, n_lon=360, n_lat=180, max_hours=24):
-
-    out_dir = os.path.join(ANIMATIONS_DIR, constellation_tag)
-    os.makedirs(out_dir, exist_ok=True)
-
-    input_names = [case + '_' + sc_name for sc_name in sc_names]
-    EEI_name = check_EEI_consistency(input_names)
-
-    jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
-    h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon')
-    h_lat_lon_SFF_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
-    T_array = get_orbital_periods(input_names)
-
-    # plots to make:
-    altitude_array = [0, 800]  # this 800 should be read from the sc input file (how about constellations wiht sats at different altitudes?)
-    SFF_array = [True, False]
-    avg_array = [False, True]
-
-
-    for day_idx in day_idxs:
-        for altitude_km in altitude_array:
-            for SFF_bool in SFF_array:
-                for avg_bool in avg_array:
-
-                    if avg_bool and not(SFF_bool): continue # skip this map due to its small meaningfulness
-
-                    altitude_tag = 'TOA' if altitude_km==0 else str(altitude_km)+'km'
-                    SFF_tag = '_SFF' if SFF_bool else ''
-                    avg_tag = '_wrt_avg' if avg_bool else ''
-                    delta_str = 'Delta ' if avg_bool else ''
-                    fname = 'day_' + str(day_idx) + '_' + altitude_tag + SFF_tag + avg_tag + '.mp4'
-
-                    if not(os.path.exists(os.path.join(out_dir, fname))):
-                        print(f"Generating {fname}")
-                        map_day_hist, jd_map_day_hist = load_day_hist_map(
-                                                                day_idx, EEI_name, n_lon, n_lat, altitude_km, 
-                                                                SFF=SFF_bool, delta_avg=avg_bool)
-                        max_steps = get_max_steps(jd_map_day_hist, max_hours)
-                        fade_coastlines_bool = False if altitude_km==0 else True
-                                    
-                        if SFF_bool:
-                            Plotter.make_map_animation_arbitrary_frame(
-                                map_grid_3D_rotated=map_day_hist[:,:,:max_steps],
-                                R_mat_hist=load_day_R_mat_hist(day_idx, EEI_name)[:max_steps,:,:],
-                                jd_vec=jd_map_day_hist,
-                                n_lon=n_lon, n_lat=n_lat,
-                                data_label=delta_str + 'Net Radial ' + altitude_tag + 'Flux (W/m$^2$)',
-                                out_dir=os.path.join(ANIMATIONS_DIR, constellation_tag),
-                                filename=fname,
-                                sat_h_lat_lon_hist_array=h_lat_lon_SFF_hist_array,
-                                sat_hist_jd_array=jd_hist_array,
-                                orbital_periods_minutes=T_array, 
-                                fade_coastlines=fade_coastlines_bool
-                            )
-
-                        else:
-                            Plotter.make_map_animation(map_grid_3D=map_day_hist[:,:,:max_steps],
-                                            jd_vec=jd_map_day_hist[:max_steps],
-                                            n_lon=n_lon, n_lat=n_lat,
-                                            data_label=delta_str + 'Net Radial ' + altitude_tag + 'Flux (W/m$^2$)',
-                                            out_dir=os.path.join(ANIMATIONS_DIR, constellation_tag),
-                                            filename=fname,
-                                            sat_h_lat_lon_hist_array=h_lat_lon_hist_array,
-                                            sat_hist_jd_array=jd_hist_array,
-                                            orbital_periods_minutes=T_array,
-                                            fade_coastlines=fade_coastlines_bool)  
-
-    print("All animations done!")
-
-
-def get_max_steps(jd_vec, max_hours):
-    assert(np.abs(jd_vec[-1] - jd_vec[0] - 1) < 1e-2 )
-
-    return int(len(jd_vec) * max_hours/24)
-
-
-def load_day_hist_map(day_idx, EEI_truth_name, n_lon, n_lat, altitude_km, SFF=False, delta_avg=False):
-
-    # remember that day_idx will be the same for both the satellite propagation and the net daily hist maps because they are both subject to the same EEI_truth, which defines the timespan
-    path = os.path.join(MEDIA_DIR, 'true_EEI', EEI_truth_name, 'grid_'+str(n_lat)+'x'+str(n_lon))
-    altitude_tag = 'toa' if altitude_km==0 else str(altitude_km)+'km'
-    SFF_tag = '_SFF' if SFF else ''
-    fname = os.path.join(path, 'daily_hist_net_' + altitude_tag + SFF_tag, 'day_'+str(day_idx))
-
-    print(f"Loading daily_hist at {altitude_tag} for day {day_idx}")
-    try:
-        net_map_day_hist = np.load(fname+'.npy')
-    except:
-        net_map_day_hist = np.loadtxt(fname+'.txt')
-        n_steps = int(np.prod(np.shape(net_map_day_hist)) / (n_lon * n_lat))
-        net_map_day_hist = net_map_day_hist.reshape((n_lat, n_lon, n_steps))
-    
-    if delta_avg:
-        net_map_day_hist = net_map_day_hist - np.mean(net_map_day_hist, axis=2)[:,:,None]
-
-    jd_day_hist = load_jd_day_hist_map(day_idx, EEI_truth_name)
-
-    return net_map_day_hist, jd_day_hist
-
-def load_day_R_mat_hist(day_idx, EEI_truth_name):
-
-    boa_fname = radiation_settings_from_EEI_truth_name(EEI_truth_name)['ephemerides']
-    path = os.path.join(MEDIA_DIR, 'solar_ephemerides', boa_fname, 'daily_files')
-    R_fname = os.path.join(path, 'R_ECEF_to_SunFrame_day_'+str(day_idx))
-    day_R_array = np.load(R_fname+'.npy')
-
-    return day_R_array
-
-
-
-def load_jd_day_hist_map(day_idx, EEI_truth_name):
-
-    boa_fname = radiation_settings_from_EEI_truth_name(EEI_truth_name)['ephemerides']
-    path = os.path.join(MEDIA_DIR, 'solar_ephemerides', boa_fname, 'daily_files')
-    jd_fname = os.path.join(path, 'jd_array_day_'+str(day_idx))
-    day_jd_array = np.load(jd_fname+'.npy')
-
-    return day_jd_array
-
-
-
-
-def get_n_days_max(input_names):  # in case some of the sc have not finished running
-    
-    EEI_name = check_EEI_consistency(input_names)
-    total_n_days = get_n_days_EEI_truth(EEI_name)
-
-    #n_days_array = [len(os.listdir(os.path.join(OUTPUT_DIR, case, 'data_output'))) for case in input_names] # erroneously included files
-    n_days_array = [len(next(os.walk(os.path.join(OUTPUT_DIR, case, 'data_output')))[1]) for case in input_names] #only includes folders
-    n_days = min(n_days_array)
-
-    if n_days<total_n_days:
-        n_days = n_days - 1
-
-    return n_days, n_days==total_n_days
-
-
-def get_n_days_EEI_truth(EEI_name):
-    EEI_settings = radiation_settings_from_EEI_truth_name(EEI_name)
-    total_n_days = int(np.diff(EEI_settings['jd_interval']).item())
-
-    return total_n_days
-
-
-def get_full_output_var_hist(case_names, var_name, n_days=None):
+def get_full_output_var_hist(case_names, var_name, jd_windows=None, n_days=None, downsample_dt=None):
 
     # TODO: n_days should not really be an input
     if n_days is None:
@@ -762,30 +739,101 @@ def get_full_output_var_hist(case_names, var_name, n_days=None):
     all_var_hist = [None] * n_SC
     for i, case in enumerate(case_names):
         var_hist = get_output_variable_hist(case, n_days, var_name, 
-                                            completed_bool) # only store stacked file if all days are done
+                                            completed_bool, jd_windows=jd_windows,
+                                            downsample_dt=downsample_dt) # completed_bool: only store stacked file if all days are done
         all_var_hist[i] = var_hist
     
     return all_var_hist
 
 
-
-
-def get_output_variable_hist(case_name, n_days, var_name, save_stacked_file_if_nonexistent=True):   # for jd: var_name=jd_vec
-
-    stacked_var_file_name = os.path.join(OUTPUT_DIR, case_name, 'data_output', 'concatenated_'+var_name+'.npy')
-    if os.path.exists(stacked_var_file_name):
+def get_output_variable_hist(sb_name, n_days, var_name, save_stacked_file_if_nonexistent=True, jd_windows=None, downsample_dt=None):   # for jd: var_name=jd_vec
+    print(f"Getting output variable: {var_name}")
+    #stacked_var_file_name = os.path.join(OUTPUT_DIR, case_name, 'data_output', 'concatenated_'+var_name+'.npy')
+    stacked_var_file_name = os.path.join(OUTPUT_DIR, sb_name, 'concatenated_'+var_name+'.npy')
+    if os.path.exists(stacked_var_file_name) and (n_days==1826 or (n_days is None)): # TODO: hard-coded n_days max
         stacked_var_array = np.load(stacked_var_file_name)
+        if (jd_windows is not None) or (downsample_dt is not None): # otherwise, all measurements selected
+            print(f"Entering get_global_meas_idxs for var {var_name}")
+            idxs_to_keep = get_global_meas_idxs(sb_name, jd_windows=jd_windows, downsample_dt=downsample_dt)
+            stacked_var_array = stacked_var_array[idxs_to_keep]
+            #print(f"len(idxs_to_keep): {len(idxs_to_keep)}")
     else:
-        
+        # TODO: filter if jd_windows is not None (function get_global_meas_days to be written) -done?
         if var_name in OUTPUT_VARS:
-            stacked_var_array = load_and_stack_output_var_hist(case_name, var_name, n_days)
+            stacked_var_array = load_and_stack_output_var_hist(sb_name, var_name, n_days)
         else:
-            stacked_var_array = compute_stacked_out_var_hist(case_name, var_name, n_days)
+            stacked_var_array = compute_stacked_out_var_hist(sb_name, var_name, n_days)
 
         if save_stacked_file_if_nonexistent:
+            assert(stacked_var_array is not None)
             np.save(stacked_var_file_name, stacked_var_array)
     
     return stacked_var_array
+
+def get_global_meas_idxs(sb_name, jd_windows=None, downsample_dt=None):
+    
+    #input_dict = input_manager.get_dicts(sb_name)
+    actual_full_jd_meas = get_output_variable_hist(
+        sb_name, n_days=None, var_name='jd_vec', save_stacked_file_if_nonexistent=False)
+
+    if jd_windows is not None:
+        min_jd, max_jd = np.min(jd_windows), np.max(jd_windows)
+        # TODO: if full concatenated file does not exist, use astropy. Also it's not very efficient to load it so many times
+        idxs_to_keep_jd_windows = (actual_full_jd_meas >= min_jd) & (actual_full_jd_meas < max_jd)
+    else:
+        idxs_to_keep_jd_windows = np.full(len(actual_full_jd_meas), True)
+    
+    if downsample_dt is not None:
+        if jd_windows is not None:
+            jd_meas = actual_full_jd_meas[idxs_to_keep_jd_windows]
+        dt_orig = np.mean(np.diff(jd_meas)) * 24 * 3600
+        downsampled_jd_array = downsample_array(jd_meas, dt_orig, downsample_dt)
+        idxs_to_keep_downsample = np.isin(actual_full_jd_meas, downsampled_jd_array)
+    else:
+        idxs_to_keep_downsample = np.full(len(actual_full_jd_meas), True)
+
+    # return np.flatnonzero((actual_full_jd_meas >= min_jd) & (actual_full_jd_meas < max_jd))
+    return (idxs_to_keep_downsample * idxs_to_keep_jd_windows)
+
+
+def get_global_meas_idxs_tests(sb_name, jd_windows):
+    input_dict = input_manager.get_dicts(sb_name)
+    EEI_name = "EEI_truth_" + str(input_dict['force_settings']['EEI_truth'])
+    sim_jd_full_window = radiation_settings_from_EEI_truth_name(EEI_name)['jd_interval']
+
+    # delta_jd_meas_simpl = input_dict['delta_t_out'] / (24 * 3600)
+    # full_jd_meas_simpl = np.arange(sim_jd_full_window[0], sim_jd_full_window[1], delta_jd_meas_simpl) 
+    t1 = time.time()
+    actual_full_jd_meas = get_output_variable_hist(sb_name, n_days=None, var_name='jd_vec', save_stacked_file_if_nonexistent=False)
+    t2 = time.time()
+    print(f"Time to load actual_full_jd_meas: {t2-t1}")
+    
+    t1 = time.time()
+    jd0, jd1 = Time(sim_jd_full_window, format='jd', scale='utc')
+    delta_t_meas = input_dict['delta_t_out'] * u.second
+    n_steps = int((jd1 - jd0) / delta_t_meas)
+    full_jd_meas = (jd0 + np.arange(n_steps)*delta_t_meas).jd   # this is basically the concatenated output jd_vec
+    t2 = time.time()
+    print(f"Time to compute full_jd_meas with astropy: {t2-t1}")
+    # delta_jd_meas = np.mean(np.diff(full_jd_meas)) # NOTE: this can differ from delta_jd_meas_simpl due to the nuances of the UTC scale, 
+                                                   # but it is the same (?) as np.mean(np.diff(actual_full_jd_meas))
+    
+    # trivial implementation:
+        
+    # NOTE: full_jd_meas_simpl and actual_full_jd_meas are slightly different due to the time scale inconsistency (86400 factor in TimeHandler (sbsim file) vs UTC scale in jd_vec (OutputManager init))
+    idxs_to_keep_b = np.where((actual_full_jd_meas>=np.min(jd_windows)) * (actual_full_jd_meas<np.max(jd_windows)))[0]
+    
+
+    min_jd, max_jd = np.min(jd_windows), np.max(jd_windows)
+    idxs_to_keep = np.where((full_jd_meas>=min_jd) * (full_jd_meas<max_jd))[0]
+
+    # more efficient (factor 10 faster) implementation: tricky because dt is not always the same in UTC
+    # # gap_to_first = min_jd - sim_jd_full_window[0]
+    # # first_idx = int(np.ceil(gap_to_first / delta_jd_meas))
+    # # n_meas_jd_window = int((max_jd - min_jd) / delta_jd_meas) + 1 # +1: chunks to edges
+    # # idxs_to_keep = np.arange(first_idx, first_idx+n_meas_jd_window, dtype=int)
+
+    return idxs_to_keep
 
 
 def load_and_stack_output_var_hist(case_name, var_name, n_days):
@@ -833,6 +881,25 @@ def compute_stacked_out_var_hist(case_name, var_name, n_days):
 
     elif var_name=="cos_theta_s":
         return compute_cos_theta_s_hist_array(case_name, n_days)
+    
+    elif var_name=="erp_recomp":
+        return None
+
+
+def recompute_all_erp_srp_acc_meas(sb_name):    # not completed and not necessary
+
+    EEI_truth_name = "EEI_truth_1" # hard-coded; to be obtained from sb_name
+
+    base_data_dir = os.path.join(MEDIA_DIR, 'true_EEI', EEI_truth_name)
+    rad_config = radiation_settings_from_EEI_truth_name(EEI_truth_name)
+    mid_day_jd_array = mid_day_jd_array_from_jd_interval(rad_config["jd_interval"])
+    all_daily_jd_arrays = get_EEI_truth_daily_jd_arrays(EEI_truth_name)
+
+    for day_idx, mid_day_jd in enumerate(mid_day_jd_array):
+        truth_jd_array = all_daily_jd_arrays[day_idx]
+        mid_day_jd = mid_day_jd_array[day_idx]
+        TSI_1AU_day = get_TSI_1AU(mid_day_jd, rad_config["TSI_source"])
+
 
 
 
@@ -860,66 +927,71 @@ def compute_sph_coord_hist_array(input_names, n_days, frame='ecef'):
 
 
 def get_day_subdir(case_name, day_idx):
-    day_subdir = os.path.join(OUTPUT_DIR, case_name, 'data_output', 'day_'+str(day_idx))
+    #day_subdir = os.path.join(OUTPUT_DIR, case_name, 'data_output', 'day_'+str(day_idx))
+    day_subdir = os.path.join(OUTPUT_DIR, case_name, 'day_'+str(day_idx))
     
     return day_subdir
 
-def get_subdir_EEI_truth(EEI_truth, n_lon, n_lat, series_type):
-    subdir = os.path.join(MEDIA_DIR, 'true_EEI', EEI_truth, 'grid_'+str(n_lat)+'x'+str(n_lon), 
-                              series_type)
-    return subdir
 
 
-def get_all_orbital_sma_0(input_names):
-    all_sma = np.zeros(len(input_names))
-
-    for i, input_name in enumerate(input_names):    
-        input_file = load_input_file(input_name)
-        all_sma[i] = input_file.SC_KEP_0['a']
+def get_n_days_max(input_names):  # in case some of the sc have not finished running
     
-    return all_sma
-    
+    EEI_name = check_EEI_consistency(input_names)
+    total_n_days = get_n_days_EEI_truth(EEI_name)
 
+    n_days_array = [len(next(os.walk(os.path.join(OUTPUT_DIR, case)))[1]) for case in input_names] #only includes folders
+    n_days = min(n_days_array)
 
-def get_orbital_periods(input_names):
+    if n_days<total_n_days:
+        n_days = n_days - 1
 
-    MU = 398600 # TODO: make consistent with propagation gravity field
-    all_sma_km = get_all_orbital_sma_0(input_names)
-    all_periods = np.zeros_like(all_sma_km)
+    return n_days, n_days==total_n_days
 
-    for i, sma in enumerate(all_sma_km):
-        all_periods[i] = compute_orbital_period(MU, sma)
-
-    return all_periods
-
-
-        
 
 def check_EEI_consistency(input_names):
 
-    all_force_settings = [None] * len(input_names)
+    all_dynamics = [None] * len(input_names)
 
-    for i, input_name in enumerate(input_names):    
-        input_file = load_input_file(input_name)
-        all_force_settings[i] = input_file.FORCE_SETTINGS # .get('EEI_case')
+    for i, input_name in enumerate(input_names):
+        config_dicts = input_manager.get_dicts(input_name)
+        all_dynamics[i] = config_dicts['force_settings']
 
-    assert(all([settings==all_force_settings[0] for settings in all_force_settings]))
-
-    EEI_name = all_force_settings[0].get('EEI_name')
-    if EEI_name is None:
-        EEI_name = "EEI_truth_1"    # all simulations run before this was a field were consistent with EEI 1
+    assert(all([settings==all_dynamics[0] for settings in all_dynamics]))
     
-    return EEI_name    
+    EEI_name = 'EEI_truth_' + str(all_dynamics[0]['EEI_truth'])
+    return EEI_name
 
 
-def compute_rolling_avg_error_time_series(sc_array, window_days, EEI_truth_time_series, jd_array_EEI_truth, evaluation_jd_array):
+def get_true_EEI_time_series(EEI_name, n_lon=None, n_lat=None):
+    
+    EEI_settings = radiation_settings_from_EEI_truth_name(EEI_name)
+    n_days = get_n_days_EEI_truth(EEI_name)
+    subdir = get_subdir_EEI_truth(EEI_name, 'daily_hist_net_toa_surf_avg')
 
-    input_names = ['case_5_years_' + sc_name for sc_name in sc_array]
-    all_altitudes = get_all_orbital_sma_0(input_names) - constants.earth_radius(units='km')
-    assert(len(np.unique(all_altitudes))==1)     # for now we don't really know how to handle different altitudes simultaneously
+    full_time_series_fname = os.path.join(subdir, 'concatenated_time_series.npy')
+    if os.path.exists(full_time_series_fname):
+        concatenated_net_toa_time_series = np.load(full_time_series_fname)
+    else:
+        all_net_toa_time_series = [None] * n_days
+        for day_idx in range(n_days):
+            day_fname = os.path.join(subdir, 'day_'+str(day_idx))
+            if os.path.exists(day_fname+'.npy'):
+                all_net_toa_time_series[day_idx] = np.load(day_fname+'.npy')
+            elif os.path.exists(day_fname+'.txt'):
+                all_net_toa_time_series[day_idx] = np.loadtxt(day_fname+'.txt')
+        
+        concatenated_net_toa_time_series = np.concatenate(all_net_toa_time_series)
+        np.save(full_time_series_fname,concatenated_net_toa_time_series)
+
+    return concatenated_net_toa_time_series
+
+def compute_EEI_estimation_errors(SB_constellation, window_days, grid: Grid, frame,
+                            method, fill_zeroes_method, avg_method, meas_source,
+                            EEI_truth_time_series, jd_array_EEI_truth, true_avg_flux_maps,
+                            evaluation_jd_array):
 
     print("")
-    print(f"Running smooth estimate {window_days}-day window (constellation_"+make_list_str_key(sc_array)+")")
+    print(f"Running smooth estimate {window_days}-day window (constellation_"+make_list_str_key(SB_constellation)+")")
     
     EEI_smooth_true = normal_smoother(EEI_truth_time_series, jd_array_EEI_truth, window_width_days=window_days, 
                                     out_length_mode='same_with_nans')
@@ -927,10 +999,54 @@ def compute_rolling_avg_error_time_series(sc_array, window_days, EEI_truth_time_
 
     jd_windows = get_rolling_jd_windows(evaluation_jd_array, window_days)
     
-    EEI_smooth_estimated = estimate_EEI_avg('case_5_years', sc_names=sc_array, 
-                                    altitude=np.unique(all_altitudes), jd_windows=jd_windows, 
-                                    n_lon=360, n_lat=180, frame="SFF", fill_method="theta_s_fit_simplified",
-                                    make_plots=False)
+    EEI_smooth_estimated, estimated_maps = estimate_EEI_avg(sb_names=SB_constellation, 
+                                    jd_windows=jd_windows, 
+                                    grid=grid, frame=frame, 
+                                    method=method,
+                                    fill_zeroes_method=fill_zeroes_method,
+                                    avg_method=avg_method,
+                                    make_plots=False,
+                                    meas_mode=meas_source,
+                                    return_avg_flux_maps=True)
+    
+    
+    assert(np.shape(EEI_smooth_estimated)==np.shape(EEI_smooth_true_coarse))
+    EEI_smooth_estimated[np.isnan(EEI_smooth_true_coarse)] = np.nan
+        
+    error_time_series = EEI_smooth_estimated-EEI_smooth_true_coarse
+    rms = nanrms(error_time_series)
+
+    error_maps = np.asarray(estimated_maps) - np.asarray(true_avg_flux_maps)
+    rms_error_map = nanrms(error_maps, axis=0)
+    rms2 = grid.compute_surf_integral(rms_error_map) / (4*np.pi*RE**2)
+
+    return error_time_series
+
+
+# deprecated function (?):
+def compute_rolling_avg_error_time_series(SB_constellation, window_days, grid: Grid, frame,
+                                          method, fill_zeroes_method, avg_method, meas_source,
+                                          EEI_truth_time_series, jd_array_EEI_truth, evaluation_jd_array):
+
+    print("")
+    print(f"Running smooth estimate {window_days}-day window (constellation_"+make_list_str_key(SB_constellation)+")")
+    
+    EEI_smooth_true = normal_smoother(EEI_truth_time_series, jd_array_EEI_truth, window_width_days=window_days, 
+                                    out_length_mode='same_with_nans')
+    EEI_smooth_true_coarse = np.interp(evaluation_jd_array, jd_array_EEI_truth, EEI_smooth_true)
+
+    jd_windows = get_rolling_jd_windows(evaluation_jd_array, window_days)
+    
+    EEI_smooth_estimated = estimate_EEI_avg(sb_names=SB_constellation, 
+                                    jd_windows=jd_windows, 
+                                    grid=grid, frame=frame, 
+                                    method=method,
+                                    fill_zeroes_method=fill_zeroes_method,
+                                    avg_method=avg_method,
+                                    make_plots=False,
+                                    meas_mode=meas_source)
+    
+    
     assert(np.shape(EEI_smooth_estimated)==np.shape(EEI_smooth_true_coarse))
     EEI_smooth_estimated[np.isnan(EEI_smooth_true_coarse)] = np.nan
         
@@ -939,179 +1055,491 @@ def compute_rolling_avg_error_time_series(sc_array, window_days, EEI_truth_time_
     return error_time_series
 
 
-
-def compute_sample_quality_metrics(constellation_list):
-
-    input_names = ['case_5_years_' + sc_name for sc_name in constellation_list]
-
-    grid_deg_spacing = 1  # TODO: make flexible
-    n_lon = int(360/grid_deg_spacing)
-    n_lat = int(180/grid_deg_spacing)
-
-    lon_vec, lat_vec, lon_edges_vec, lat_edges_vec = get_sphere_grid(n_lon, n_lat)
-    alt = 800 # TODO: read from sc input files
-    r_grid = lonlat_to_r(lon_vec, lat_vec, alt, "spherical")
-
-
-    h_lat_lon_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon')
-    lat_hist = np.concatenate([hist[:,1] for hist in h_lat_lon_hist_array])
-    lon_hist = np.concatenate([hist[:,2] for hist in h_lat_lon_hist_array])
-    n_steps = len(lat_hist)
-
-    lat_idxs, lon_idxs = get_latlon_cell_idxs(lat_hist, lon_hist, n_lon, n_lat)
-
-    full_r_ecef_hist_array = np.concatenate(get_full_output_var_hist(input_names, 'xyz_ecef'))
-
-    r_offsets = full_r_ecef_hist_array - r_grid[lat_idxs, lon_idxs, :]
-
-    x_offsets_avg_map = scipy.sparse.coo_array(
-            (r_offsets[:,0], (lat_idxs, lon_idxs, np.arange(n_steps))),
-            shape=(n_lat, n_lon, n_steps)
-        ).mean(axis=2)
+def get_acc_to_flux_factor(input_name):
+    config_dicts = input_manager.get_dicts(input_name)
     
-    y_offsets_avg_map = scipy.sparse.coo_array(
-            (r_offsets[:,1], (lat_idxs, lon_idxs, np.arange(n_steps))),
-            shape=(n_lat, n_lon, n_steps)
-        ).mean(axis=2)
+    if config_dicts['sc_params']['shape']=="sphere":
+        # Cannonball model
+        diff_reflect = config_dicts['sc_params']['diffReflect']
+        diff_degrade = config_dicts['sc_params']['diffDegrade']
+        K_fact = 1 + (4/3 * diff_degrade * diff_reflect)
+        mass = config_dicts['sc_params']['mass']
+        area = config_dicts['sc_params']['area']
+        return - mass /area * LIGHT_SPEED / K_fact
     
-    z_offsets_avg_map = scipy.sparse.coo_array(
-            (r_offsets[:,2], (lat_idxs, lon_idxs, np.arange(n_steps))),
-            shape=(n_lat, n_lon, n_steps)
-        ).mean(axis=2)
+    else:
+        print("Not implemented!")
+
+
+
+def generate_error_map_animations(sb_names, constellation_tag, jd_windows, grid: Grid, day_0_idx=0, frame='SFF'):
     
-    r_offsets_avg_map = np.stack((x_offsets_avg_map, y_offsets_avg_map, z_offsets_avg_map), axis=2)
-    offset_norms_avg_map = np.linalg.norm(r_offsets_avg_map, axis=2)
+    window_lengths = np.squeeze(np.diff(jd_windows))
+    win_length = np.max(window_lengths)
+    jd_windows = jd_windows[window_lengths==win_length,:]
 
-    print("done")
+    out_dir = os.path.join(ANIMATIONS_DIR, constellation_tag)
+    os.makedirs(out_dir, exist_ok=True)
 
+    EEI_name = check_EEI_consistency(sb_names)
+    rad_config = radiation_settings_from_EEI_truth_name(EEI_name)
+    EEI_full_window = rad_config["jd_interval"]
+    mid_day_jd = mid_day_jd_array_from_jd_interval(EEI_full_window)
 
+    jd_0 = EEI_full_window[0] + day_0_idx # TODO: nonzero delta_jd_0 from the inputs database?
+    daily_jd_arrays = get_EEI_truth_daily_jd_arrays(EEI_name)
 
-    h_lat_lon_SFF_hist_array = get_full_output_var_hist(input_names, 'h_lat_lon_SFF')
-    r_sff_hist_array = get_full_output_var_hist(input_names, 'xyz_sun_frame')
+    #assert(len(jd_windows)==len(mid_day_jd))
     
+    jd_hist_array = get_full_output_var_hist(sb_names, 'jd_vec')
+
+    if frame=="ECEF":
+        h_lat_lon_hist_array = get_full_output_var_hist(sb_names, 'h_lat_lon')
+        R_hist = np.stack([np.eye(3) for _ in range(len(mid_day_jd))], axis=0)
+    elif frame=="SFF":
+        h_lat_lon_hist_array = get_full_output_var_hist(sb_names, 'h_lat_lon_SFF')
+        R_hist = load_R_mat_jd_array(mid_day_jd, EEI_name)
+        #R_hist = np.zeros((len(mid_day_jd),3,3))
+        #for day_idx in range(len(mid_day_jd)):
+        #    R_day_hist = load_day_R_mat_hist(day_idx, EEI_name)
+        #    R_hist[day_idx, :,:] = R_day_hist[720,:,:]  # only store the mid-day rotation matrix
+
+    method="binary_gridding"
+
+    frame_tag = '_SFF_accurate' if frame=="SFF" else ''
+
+    # radial_flux_meas_arrays, weight_arrays = get_radial_measurement_arrays(sb_names, grid, method, frame, 
+    #                                                                        meas='flux', meas_mode='recomp_radial') # sparse arrays
+    # avg_flux_maps = get_stacked_avg_maps_new(jd_windows, jd_hist_array, radial_flux_meas_arrays, weight_arrays)
+    EEI_smooth_estimated, estimated_maps = estimate_EEI_avg(
+                                    sb_names=sb_names, 
+                                    jd_windows=jd_windows, 
+                                    grid=grid, method=method, frame=frame,
+                                    meas_mode='recomp_radial',
+                                    return_avg_flux_maps=True)
+    
+    true_avg_flux_maps = get_window_avg_maps(EEI_name, jd_windows, 'daily_avg_net_Fr_800km'+frame_tag, grid)
+    error_maps = true_avg_flux_maps - estimated_maps
+    
+    maps_max_col = 70 if frame=="SFF" else np.max(np.abs(error_maps))
+    
+    inclinations = [input_manager.get_dicts(sb)["orbit"]["i_0"] for sb in sb_names]
+    names = [input_manager.get_dicts(sb)["orbit"]["orbit_name"] for sb in sb_names]
+    title_head = "Orbits " + ", ".join([f"{name} ({incl:.2f}$^o$)" for (name, incl) in zip(names, inclinations)])
+    
+    Plotter.make_map_animation_arbitrary_frame(
+        map_hist=error_maps.T,
+        jd_vec=mid_day_jd, #[window[1] for window in jd_windows],
+        grid=grid,
+        data_label='Stacked meas. radial flux (W/m$^2$)',
+        out_dir=out_dir,
+        filename='error_stacked_maps_'+str(int(win_length))+'-days_'+frame+'.mp4',
+        sat_h_lat_lon_hist_array=h_lat_lon_hist_array,
+        sat_hist_jd_array=jd_hist_array,
+        orbital_periods_minutes=get_orbital_periods(sb_names),
+        add_satellite_positions=False,
+        add_groundtracks=False,
+        add_coastlines=True,
+        fade_coastlines=True,
+        R_mat_hist=R_hist,
+        groundtrack_linstyle='-',
+        max_abs_colorscale=maps_max_col,
+        title_header=title_head
+    )
+
+
+def generate_constellation_stacking_animations(sb_names, constellation_tag, jd_windows, grid: Grid, 
+                                               day_0_idx=0, frame='SFF', mid_day_jd=None):
+    window_lengths = np.squeeze(np.diff(jd_windows))
+    win_length = np.max(window_lengths)
+    min_length = np.min(window_lengths)
+
+    #extra_first_block = [[jd_windows[0][0], jd_windows[0][0]+i+0.5] for i in range(int(np.floor(min_length)))]
+    #jd_windows = np.vstack((extra_first_block, jd_windows))
+    #jd_windows[window_lengths==win_length,:]
+
+    out_dir = os.path.join(ANIMATIONS_DIR, constellation_tag)
+    os.makedirs(out_dir, exist_ok=True)
+
+    EEI_name = check_EEI_consistency(sb_names)
+    rad_config = radiation_settings_from_EEI_truth_name(EEI_name)
+    EEI_full_window = rad_config["jd_interval"]
+    if mid_day_jd is None:
+        mid_day_jd = mid_day_jd_array_from_jd_interval(EEI_full_window)
+
+    jd_0 = EEI_full_window[0] + day_0_idx # TODO: nonzero delta_jd_0 from the inputs database?
+    daily_jd_arrays = get_EEI_truth_daily_jd_arrays(EEI_name)
+
+    #assert(len(jd_windows)==len(mid_day_jd))
+    
+    jd_hist_array = get_full_output_var_hist(sb_names, 'jd_vec')
+
+    if frame=="ECEF":
+        h_lat_lon_hist_array = get_full_output_var_hist(sb_names, 'h_lat_lon')
+        R_hist = np.stack([np.eye(3) for _ in range(len(mid_day_jd))], axis=0)
+    elif frame=="SFF":
+        h_lat_lon_hist_array = get_full_output_var_hist(sb_names, 'h_lat_lon_SFF')
+        R_hist = load_R_mat_jd_array(mid_day_jd, EEI_name)
+        #R_hist = np.zeros((len(mid_day_jd),3,3))
+        #for day_idx in range(len(mid_day_jd)):
+        #    R_day_hist = load_day_R_mat_hist(day_idx, EEI_name)
+        #    R_hist[day_idx, :,:] = R_day_hist[720,:,:]  # only store the mid-day rotation matrix
+
+    method="binary_gridding"
+    radial_flux_meas_arrays, weight_arrays = get_radial_measurement_arrays(sb_names, grid, method, frame, meas='flux') # sparse arrays
+    avg_flux_maps = get_stacked_avg_maps_new(jd_windows, jd_hist_array, radial_flux_meas_arrays, weight_arrays)
+    
+    inclinations = [input_manager.get_dicts(sb)["orbit"]["i_0"] for sb in sb_names]
+    names = [input_manager.get_dicts(sb)["orbit"]["orbit_name"] for sb in sb_names]
+    title_head = "Orbits " + ", ".join([f"{name} ({incl:.2f}$^o$)" for (name, incl) in zip(names, inclinations)])
+    
+    Plotter.make_map_animation_arbitrary_frame(
+        map_hist=avg_flux_maps.T,
+        jd_vec=mid_day_jd, #[window[1] for window in jd_windows],
+        grid=grid,
+        data_label='Stacked meas. radial flux (W/m$^2$)',
+        out_dir=out_dir,
+        filename= 'stacking_all_days_'+str(int(win_length))+'-days_'+frame+'.mp4',
+        sat_h_lat_lon_hist_array=h_lat_lon_hist_array,
+        sat_hist_jd_array=jd_hist_array,
+        orbital_periods_minutes=get_orbital_periods(sb_names),
+        add_satellite_positions=False,
+        add_coastlines=True,
+        fade_coastlines=True,
+        add_groundtracks=True,
+        R_mat_hist=R_hist,
+        groundtrack_linstyle='-',
+        title_header=title_head,
+        adaptative_colorbar=True
+    )
+
+
+
+
+def generate_constellation_day_animations(sb_names, constellation_tag, day_idxs, grid: Grid, max_hours=24):
+
+    out_dir = os.path.join(ANIMATIONS_DIR, constellation_tag)
+    os.makedirs(out_dir, exist_ok=True)
+
+    EEI_name = check_EEI_consistency(sb_names)
+    jd_hist_array = get_full_output_var_hist(sb_names, 'jd_vec')
+    h_lat_lon_hist_array = get_full_output_var_hist(sb_names, 'h_lat_lon')
+    h_lat_lon_SFF_hist_array = get_full_output_var_hist(sb_names, 'h_lat_lon_SFF')
+
+    # TBC...
+
+def get_orbital_periods(sb_names):
+    MU = 398600
+    all_T = [None] * len(sb_names)
+
+    for i, sb in enumerate(sb_names):
+        config_dicts = input_manager.get_dicts(sb)
+        all_T[i] = compute_orbital_period(MU, config_dicts['orbit']['a_0'])
+
+    return all_T
+
+
+def load_R_mat_jd_array(jd_array, EEI_truth_name):
+    
+    rad_settings = radiation_settings_from_EEI_truth_name(EEI_truth_name)
+    boa_fname = rad_settings['ephemerides']
+    n_days = int(np.diff(rad_settings['jd_interval'])[0])
+
+    path = os.path.join(MEDIA_DIR, 'solar_ephemerides', boa_fname, 'daily_files')
+    concatenated_jd_array_file = os.path.join(path, 'concatenated_jd_array.npy')
+    concatenated_day_idx_file = os.path.join(path, 'concatenated_day_idx.npy')
+    if os.path.exists(concatenated_jd_array_file):
+        concatenated_jd_array = np.load(concatenated_jd_array_file)
+        concatenated_day_idx_array = np.load(concatenated_day_idx_file)
+    else:
+        all_jd_arrays = [None] * n_days
+        all_day_idxs = [None] * n_days
+        for i in range(n_days):
+            progress_bar(i, n_days)
+            all_jd_arrays[i] = np.load(os.path.join(path, 'jd_array_day_'+str(i)+'.npy'))
+            all_day_idxs[i] = np.ones_like(all_jd_arrays[i]) * i
+        
+        concatenated_jd_array = np.concatenate(all_jd_arrays)
+        concatenated_day_idx_array = np.concatenate(all_day_idxs)
+        np.save(concatenated_jd_array_file, concatenated_jd_array)
+        np.save(concatenated_day_idx_file, concatenated_day_idx_array)
+
+    idxs = find_idxs(jd_array, concatenated_jd_array)
+    day_idxs = np.asarray(concatenated_day_idx_array[idxs], dtype=int)
+    
+    R_hist = np.zeros((len(jd_array),3,3))
+    day_idx_prev = np.nan
+    for i, jd in enumerate(jd_array):
+        progress_bar(i, len(jd_array))
+        day_idx = day_idxs[i]
+        if day_idx!=day_idx_prev:
+            R_fname = os.path.join(path, 'R_ECEF_to_SunFrame_day_'+str(day_idx))
+            day_R_array = np.load(R_fname+'.npy')
+            day_jd_array = np.load(os.path.join(path, 'jd_array_day_'+str(day_idx)+'.npy'))
+        day_idx_prev = day_idx
+
+        step_idx = find_idxs(jd, day_jd_array)
+        R_hist[i,:,:] = day_R_array[step_idx, :, :]
+
+    return R_hist
+
+            
+
+
+def load_day_R_mat_hist(day_idx, EEI_truth_name):
+
+    boa_fname = radiation_settings_from_EEI_truth_name(EEI_truth_name)['ephemerides']
+    path = os.path.join(MEDIA_DIR, 'solar_ephemerides', boa_fname, 'daily_files')
+    R_fname = os.path.join(path, 'R_ECEF_to_SunFrame_day_'+str(day_idx))
+    day_R_array = np.load(R_fname+'.npy')
+
+    return day_R_array
+
+
+def get_all_jd_windows(EEI_name, window_days):
+    
+    rad_config = radiation_settings_from_EEI_truth_name(EEI_name)
+    EEI_full_window = rad_config["jd_interval"]
+    mid_day_jd = mid_day_jd_array_from_jd_interval(EEI_full_window)
+    jd_windows = get_rolling_jd_windows(mid_day_jd, window_days)
+
+    return jd_windows
+
+
+
+# old functions
+
+
+def get_stacked_avg_maps(jd_windows, jd_hist_array, all_2D_measurement_arrays) : #, fill_unobserved_cells_method='zeroes', altitude=None): # method: 'zeroes', 'nearest', 'linear', 'cubic', 'theta_s_interp'
+    # each 2D measurement array is n_grid_elements x n_steps
+
+    n_sc = len(all_2D_measurement_arrays)
+    n_windows = len(jd_windows)
+    
+    first_last_idxs_array = [None] * n_sc
+
+    for sc_i in range(n_sc):
+        jd_vec = jd_hist_array[sc_i]
+        first_last_idxs_array[sc_i] = get_jd_window_idxs(jd_vec, jd_windows)    # this is vectorized and single-time computed
+
+    all_meas_avg_maps = [None] * n_windows
+
+    if are_all_arrays_equal(first_last_idxs_array):
+        print("jd_vecs are exactly equal - stacking individual sc arrays")
+        first_last_idxs = first_last_idxs_array[0]
+        stacked_meas_2D_array = scipy.sparse.vstack(all_2D_measurement_arrays) # stacked here means place on top of one another
+        stacked_meas_2D_array = stacked_meas_2D_array.tocsr()
+
+        t1 = time.time()
+        for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
+            progress_bar(window_i, len(jd_windows))
+            first_idx, last_idx = first_last_idxs[window_i,:]
+            all_meas_counts = getnnz(stacked_meas_2D_array[:,first_idx:last_idx], axis=1)
+            all_stacked_meas = stacked_meas_2D_array[:,first_idx:last_idx].sum(axis=1) #stacked as in compressed along time axis but they are still stacked as in the meaning before
+
+            meas_counts_array = np.split(all_meas_counts, n_sc)
+            stacked_measurements_array = np.split(all_stacked_meas, n_sc)
+            all_meas_avg_maps[window_i] = get_meas_avg_map_array(stacked_measurements_array, meas_counts_array)
+        t2 = time.time()
+        print(f"Time to loop over jd_windows (all sattellites): {t2-t1}")
+
+    else:
+        print("jd_vecs are not equal - looping over individual sc arrays")
+        for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
+            #progress_bar(window_i, len(jd_windows))
+            stacked_measurements_array = [None] * n_sc
+            meas_counts_array = [None] * n_sc
+
+            for sc_i in range(n_sc):
+                first_idx, last_idx = first_last_idxs_array[sc_i][window_i,:]
+
+                meas_counts_array[sc_i] = getnnz(all_2D_measurement_arrays[sc_i][:,first_idx:last_idx], axis=1)
+                stacked_measurements_array[sc_i] = all_2D_measurement_arrays[sc_i][:,first_idx:last_idx].sum(axis=1)
+
+            all_meas_avg_maps[window_i] = get_meas_avg_map_array(stacked_measurements_array, meas_counts_array)
+    
+    return all_meas_avg_maps
+
+def get_meas_avg_map_array(stacked_measurements_array, meas_counts_array):
+
+    summed_meas_array = np.sum(stacked_measurements_array, axis=0)
+    summed_counts_array = np.sum(meas_counts_array, axis=0)
+    summed_counts_array[summed_counts_array==0] = 1
+
+    return summed_meas_array / summed_counts_array
+
+
+
+def getnnz(sparse_array_in, axis):
+
+    sparse_array = copy.deepcopy(sparse_array_in)
+
+    # it seems that creating a copy of the sparse array is not needed
+    sparse_array.data[:] = 1
+    nnz_array = sparse_array.sum(axis=axis)
+    
+    return nnz_array
+
 
 
 
 if __name__ == "__main__":
+    #sb_names = ['7b680b988948c2cd', '9e750b3b250f449b', 'a898e645c936d9db']
+    #sb_names = ['2151699c6e13c489','bc67760fbec64597','ff616870cd0c6bdf']
+    #jd_windows = 3*365+np.array([[2458119.5+i, 2458119.5+365+i] for i in range(100)])
 
-    #read_data('case_5_years', sc_names=['sc_C1', 'sc_C2', 'sc_C3'])
+    sb_names = ['32c08b39a7c5dce2', '7b54acc8701b0625', '82c0c7e77260bb76'] # best 3-sat, 1-yr
+    
+    EEI_name = check_EEI_consistency(sb_names)
+    jd_windows = get_all_jd_windows(EEI_name, 365)[:10]
+
+    grid = QuadratureGrid(alt_km=800, order=131)
+    generate_error_map_animations(sb_names, 'test3', jd_windows, grid)
+    #generate_constellation_stacking_animations(sb_names, 'test2', jd_windows, grid)
+
+    """
     t1 = time.time()
-    EEI_avg = estimate_EEI_avg('case_5_years', sc_names=['sc_C1', 'sc_C2', 'sc_C3'], 
-                               altitude=800, jd_windows=[[2458119.5, 2458119.5+365]], 
-                     n_lon=360, n_lat=180, frame="SFF")
+    grid = QuadratureGrid(alt_km=800, order=131)
+    estimated_EEI = estimate_EEI_avg(sb_names, jd_windows=jd_windows, grid=grid, frame='SFF')
+    print(estimated_EEI)
     t2 = time.time()
-    print(f"Full time to compute EEI: {t2-t1}")
-    print(EEI_avg)
-
-    #generate_constellation_day_animations('case_5_years', sc_names=['sc_A1', 'sc_A2', 'sc_A3'],
-    #                                      constellation_tag='constellation_A',
-    #                                      day_idxs=[0, 182], max_hours=12)
-
-
-
-
-
-
-# # SFF sanity check:
-# 
-# day_0_jd = np.round(EEI_settings['jd_interval'][0])
-# R_ECEF_2_SFF_hist_day_0 = get_R_SunFrame_hist(EEI_settings['ephemerides'], day_0_jd)
-# 
-# for i in range(3):
-#     r_sff_0_monte = r_sff_hist_array[i][0]
-#     r_sff_0_converted = R_ECEF_2_SFF_hist_day_0[0,:,:] @ r_ecef_hist_array[i][0]
-#     diff = r_sff_0_monte - r_sff_0_converted
-#     print(diff)
+    print(f"Time to compute EEI with quadrature grid (c00 fit): {t2-t1}")
     
+    t1 = time.time()
+    grid = QuadratureGrid(alt_km=800, order=131)
+    estimated_EEI_2 = estimate_EEI_avg(sb_names, jd_windows=jd_windows, grid=grid, frame='SFF', avg_method='c00_fit')
+    print(estimated_EEI_2)
+    t2 = time.time()
+    print(f"Time to compute EEI with quadrature grid (c00 fit): {t2-t1}")
+    print(estimated_EEI_2 - estimated_EEI)
+
+    t1 = time.time()
+    grid = RegularLatLonGrid(alt_km=800, n_lat=180, n_lon=360)
+    estimated_EEI_3 = estimate_EEI_avg(sb_names, jd_windows=jd_windows, grid=grid, frame='SFF')
+    print(estimated_EEI_3)
+    t2 = time.time()
+    print(f"Time to compute EEI with regular grid: {t2-t1}")
+
+    t1 = time.time()
+    grid = RegularLatLonGrid(alt_km=800, n_lat=180, n_lon=360)
+    estimated_EEI_4 = estimate_EEI_avg(sb_names, jd_windows=jd_windows, grid=grid, frame='SFF', avg_method='c00_fit')
+    print(estimated_EEI_4)
+    t2 = time.time()
+    print(f"Time to compute EEI with regular grid: {t2-t1}")
+
+    print(estimated_EEI_3 - estimated_EEI_4)
+
+    read_data(sb_names)
+    """
 
 
 
+#############################################
+###### DEPRECATED FUNCTION GRAVEYARD ########
+#############################################
+
+"""
+
+def convolve_A_AI(A_in, w, dw):
+
+    n_p, n_t = A_in.shape
+    n_out = (n_t - w + 1 + dw - 1) // dw
+    A_out = np.zeros((A_in.shape[0], n_out), dtype=A_in.dtype)
+
+    A_csr = A_in.tocsr()
+    for i in range(n_p):
+        progress_bar(i, n_p)
+        diff = np.zeros(n_out + 1, dtype=A_in.dtype)
+        row_start = A_csr.indptr[i]
+        row_end = A_csr.indptr[i+1]
+        cols = A_csr.indices[row_start:row_end]
+        vals = A_csr.data[row_start:row_end]
+
+        for c, v in zip(cols, vals):
+            j0 = (c - w + dw) // dw
+            if j0 < 0:
+                j0 = 0
+            j1 = c // dw
+            if j1 >= n_out:
+                j1 = n_out - 1
+            if j0 <= j1:
+                diff[j0] += v
+                diff[j1 + 1] -= v
+
+        A_out[i, :] = np.cumsum(diff[:-1])
+     
+    return A_out
 
 
-# def get_jd_hist(case_name, n_days):
-#     
-#     # day_subdirs = get_day_subdirs(case_name)
-# 
-#     try:
-#         concatenated_jd_file_name = os.path.join(OUTPUT_DIR, case_name, 'concatenated_jd_vec.npy')
-#         concatenated_jd_vec = np.load(concatenated_jd_file_name)
-#     except:
-#         daily_jd_vec_array = [None] * n_days
-#         
-#         print("Loading daily jd files...")
-#         for i in range(n_days):
-#             
-#             progress_bar(i, n_days)
-#             day_subdir = get_day_subdir(case_name, i)
-#             try:
-#                 day_jd_vec = np.load(os.path.join(day_subdir, 'jd_vec.npy'))
-#             except:
-#                 day_jd_vec = np.loadtxt(os.path.join(day_subdir, 'jd_vec.csv'))
-# 
-#             daily_jd_vec_array[i] = day_jd_vec
-#         
-#         concatenated_jd_vec = np.concatenate(daily_jd_vec_array)
-#         np.save(concatenated_jd_file_name, concatenated_jd_vec)
-#     
-#     return concatenated_jd_vec
+def get_stacked_avg_maps(jd_windows, jd_hist_array, all_2D_measurement_arrays) : #, fill_unobserved_cells_method='zeroes', altitude=None): # method: 'zeroes', 'nearest', 'linear', 'cubic', 'theta_s_interp'
+    # each 2D measurement array is n_grid_elements x n_steps
 
-
-
-
-# def get_full_jd_hist(case_names, n_days=None):
-# 
-#     if n_days is None:
-#         n_days = get_n_days_max(case_names)
-# 
-#     n_SC = len(case_names)
-#     
-#     all_jd_hist = [None] * n_SC
-#     for i, case in enumerate(case_names):
-#         jd_hist = get_variable_hist(case, n_days, 'jd_vec')
-#         all_jd_hist[i] = jd_hist
-#     
-#     return all_jd_hist
-# 
-# def get_full_r_ecef_hist(case_names, n_days=None):
-#     if n_days is None:
-#         n_days = get_n_days_max(case_names)
-# 
-#     n_SC = len(case_names)
-#     
-#     all_r_hist = [None] * n_SC
-#     for i, case in enumerate(case_names):
-#         r_hist = get_variable_hist(case, n_days, 'xyz_ecef')
-#         all_r_hist[i] = r_hist
+    n_sc = len(all_2D_measurement_arrays)
+    n_windows = len(jd_windows)
     
-#    return all_r_hist
+    first_last_idxs_array = [None] * n_sc
+
+    for sc_i in range(n_sc):
+        jd_vec = jd_hist_array[sc_i]
+        first_last_idxs_array[sc_i] = get_jd_window_idxs(jd_vec, jd_windows)    # this is vectorized and single-time computed
+
+    all_meas_avg_maps = [None] * n_windows
+
+    if are_all_arrays_equal(first_last_idxs_array):
+        print("jd_vecs are exactly equal - stacking individual sc arrays")
+        first_last_idxs = first_last_idxs_array[0]
+        stacked_meas_2D_array = scipy.sparse.vstack(all_2D_measurement_arrays) # stacked here means place on top of one another
+        stacked_meas_2D_array = stacked_meas_2D_array.tocsr()
+
+        t1 = time.time()
+        for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
+            progress_bar(window_i, len(jd_windows))
+            first_idx, last_idx = first_last_idxs[window_i,:]
+            all_meas_counts = getnnz(stacked_meas_2D_array[:,first_idx:last_idx], axis=1)
+            all_stacked_meas = stacked_meas_2D_array[:,first_idx:last_idx].sum(axis=1) #stacked as in compressed along time axis but they are still stacked as in the meaning before
+
+            meas_counts_array = np.split(all_meas_counts, n_sc)
+            stacked_measurements_array = np.split(all_stacked_meas, n_sc)
+            all_meas_avg_maps[window_i] = get_meas_avg_map_array(stacked_measurements_array, meas_counts_array)
+        t2 = time.time()
+        print(f"Time to loop over jd_windows (all sattellites): {t2-t1}")
+
+    else:
+        print("jd_vecs are not equal - looping over individual sc arrays")
+        for window_i, jd_window in enumerate(jd_windows):    # vectorizing this loop does not at all seem straightforward
+            #progress_bar(window_i, len(jd_windows))
+            stacked_measurements_array = [None] * n_sc
+            meas_counts_array = [None] * n_sc
+
+            for sc_i in range(n_sc):
+                first_idx, last_idx = first_last_idxs_array[sc_i][window_i,:]
+
+                meas_counts_array[sc_i] = getnnz(all_2D_measurement_arrays[sc_i][:,first_idx:last_idx], axis=1)
+                stacked_measurements_array[sc_i] = all_2D_measurement_arrays[sc_i][:,first_idx:last_idx].sum(axis=1)
+
+            all_meas_avg_maps[window_i] = get_meas_avg_map_array(stacked_measurements_array, meas_counts_array)
+    
+    return all_meas_avg_maps
+
+
+def get_meas_avg_map_array(stacked_measurements_array, meas_counts_array):
+
+    summed_meas_array = np.sum(stacked_measurements_array, axis=0)
+    summed_counts_array = np.sum(meas_counts_array, axis=0)
+    summed_counts_array[summed_counts_array==0] = 1
+
+    return summed_meas_array / summed_counts_array
 
 
 
+def getnnz(sparse_array_in, axis):
 
-# def get_stacked_avg_map_old(jd_window, jd_hist_array, all_3D_measurement_arrays):
-# 
-#     n_sc = len(all_3D_measurement_arrays)
-#     
-#     # get EEI_avg on a given time window
-#     stacked_measurements_array = [None] * n_sc
-#     meas_counts_array = [None] * n_sc
-# 
-#     for sc_i in range(n_sc):
-# 
-#         jd_vec = jd_hist_array[sc_i]
-#         first_idx = np.searchsorted(jd_vec, jd_window[0], side="left")
-#         last_idx  = np.searchsorted(jd_vec, jd_window[1], side="right") # robustness credit to ChatGPT
-# 
-#         meas_counts_array[sc_i] = getnnz(all_3D_measurement_arrays[sc_i][:,:,first_idx:last_idx], axis=2)
-#         stacked_measurements_array[sc_i] = all_3D_measurement_arrays[sc_i][:,:,first_idx:last_idx].sum(axis=2)
-#         
-#     summed_meas_array = np.sum(stacked_measurements_array, axis=0)
-#     summed_counts_array = np.sum(meas_counts_array, axis=0)
-# 
-#     no_meas_cell_idxs = summed_counts_array==0
-#     summed_counts_array[no_meas_cell_idxs] = 1
-#     summed_meas_array[no_meas_cell_idxs] = np.nan
-# 
-#     meas_avg_map = fill_nans_in_data_array(summed_meas_array, method='zeroes') / summed_counts_array
-# 
-#     return meas_avg_map
+    sparse_array = copy.deepcopy(sparse_array_in)
+
+    # it seems that creating a copy of the sparse array is not needed
+    sparse_array.data[:] = 1
+    nnz_array = sparse_array.sum(axis=axis)
+    
+    return nnz_array
+
+"""

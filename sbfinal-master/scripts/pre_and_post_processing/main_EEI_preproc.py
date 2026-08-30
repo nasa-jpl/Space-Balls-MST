@@ -3,11 +3,11 @@ from SpaceBalls.sph_meshing import RegularLatLonGrid, QuadratureGrid
 
 if __name__ == '__main__':
 
-    EEI_truth_name = "EEI_truth_0"
+    EEI_truth_name = "EEI_truth_35"
     #grid = RegularLatLonGrid(alt_km=0, n_lat=18, n_lon=36)
-    grid = QuadratureGrid(alt_km=800, order=131)
+    grid = QuadratureGrid(alt_km=0, order=131)
     compute_radiation_maps(EEI_truth_name, grid=grid, 
-                           selected_days_idxs=None, n_cores=14)
+                           selected_days_idxs=None, n_cores=1)
 
 """
 # 2 cores seems to work for a 1deg x Leb131 grid - let's run this for now

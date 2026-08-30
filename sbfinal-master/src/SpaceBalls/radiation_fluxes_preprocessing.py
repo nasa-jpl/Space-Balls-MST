@@ -13,7 +13,7 @@ import SpaceBalls.radiation_settings as rad_settings
 from SpaceBalls.sph_meshing import Grid, RegularLatLonGrid, QuadratureGrid, expand_sh, field_hist_rotation_multiproc
 
 import config.constants as constants
-from SpaceBalls.utils import get_all_r_rel, get_all_cos_alpha, get_r_rel_norm
+from SpaceBalls.utils import get_all_r_rel, get_all_cos_alpha, get_r_rel_norm, progress_bar, jd_to_mmddyyyy
 from SpaceBalls.plotter import Plotter
 
 AU = constants.astronomical_unit(units='km')
@@ -110,7 +110,7 @@ def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, 
             toa_emission_day_hist, net_toa_day_hist = get_daily_hist_toa(base_data_dir, day_idx, mid_day_jd, TSI_1AU_day, 
                                                                          rad_config, grid)
             save_toa_files(toa_emission_day_hist, net_toa_day_hist, base_data_dir, day_idx, R_ECEF_to_SunFrame_day_hist, 
-                           grid, n_cores=n_cores, save_SFF_hist=(day_idx in selected_days_idxs))
+                           grid, n_cores=n_cores, save_SFF_hist=False) #(day_idx in selected_days_idxs))
 
         elif grid.alt_km>0 and not(all(file_existences.values())):
 
@@ -390,7 +390,8 @@ def compute_daily_hist_at_sat_r_hist(EEI_truth_name, sat_r_hist, sat_jd_hist, da
         t1 = time.time()
         erp_Fr_hist, srp_Fr_hist = np.zeros(n_steps), np.zeros(n_steps)
         for i in range(n_steps):
-            print(f"Computing step {i+1}/{n_steps}")
+            #print(f"Computing step {i+1}/{n_steps}")
+            progress_bar(i, n_steps)
             r_sun_step = r_sun_day_sat_times[i,:]
             d_sun_step = d_sun_day_sat_times[i]
             r_sat_step = sat_r_hist[i,:]
@@ -602,11 +603,24 @@ def compute_daily_time_series_toa(mid_day_jd, rad_config, TSI_1AU_day, grid: Gri
 
     
     day_datestr = Time(mid_day_jd, format='jd').to_datetime().strftime("%Y-%m-%d")
-    a_map, e_map = get_expanded_ae_maps(day_datestr, grid, rad_config) # TRUNCATION!!!
-    
-    LW_outgoing_day_hist_toa = e_map[:, None] / 4 * TSI_Earth_day_vec[None, :] # here we DO use the TSI at the center of the Earth (Knocke model and Monte docs)
-    SW_outgoing_day_hist_toa = zeroed_cos_theta_s_day_hist_toa * a_map[:, None] * TSI_Earth_day_vec[None, :]
 
+    #if not(rad_config.get('time_interp', False)):
+    if not("time_interp" in rad_config):
+        # what we have now: constant a/e thorughout a single day
+        a_map, e_map = get_expanded_ae_maps(day_datestr, grid, rad_config) 
+        LW_outgoing_day_hist_toa = e_map[:, None] / 4 * TSI_Earth_day_vec[None, :] # here we DO use the TSI at the center of the Earth (Knocke model and Monte docs)
+        SW_outgoing_day_hist_toa = zeroed_cos_theta_s_day_hist_toa * a_map[:, None] * TSI_Earth_day_vec[None, :]
+    else:
+        # else: we want to interpolate the a/e maps to the 1-min time resolution
+        print("Getting smooth daily ae hist...")
+        a_hist, e_hist = get_smooth_daily_ae_hist(mid_day_jd, rad_config, grid)
+        if rad_config["time_interp"]=="sh_interp":
+            a_hist = expand_daily_map_hist(a_hist, grid, rad_config['sh_normalization'])
+            e_hist = expand_daily_map_hist(e_hist, grid, rad_config['sh_normalization'])
+
+        LW_outgoing_day_hist_toa = e_hist[:, :].T / 4 * TSI_Earth_day_vec[None, :] # here we DO use the TSI at the center of the Earth (Knocke model and Monte docs)
+        SW_outgoing_day_hist_toa = zeroed_cos_theta_s_day_hist_toa * a_hist[:, :].T * TSI_Earth_day_vec[None, :]
+    
     toa_emission_day_hist = LW_outgoing_day_hist_toa + SW_outgoing_day_hist_toa
     net_toa_day_hist = solar_incoming_day_hist_toa - toa_emission_day_hist
 
@@ -801,11 +815,6 @@ def save_altitude_files(daily_hist_net_F, daily_hist_net_Fr, base_data_dir, day_
         np.save(all_file_names[f"daily_hist_net_F_{grid.alt_km}km"], daily_hist_net_F)
 
         
-
-
-    
-
-
 def get_EEI_truth_daily_jd_arrays(EEI_truth_name):
 
     rad_config = rad_settings.radiation_settings_from_EEI_truth_name(EEI_truth_name)
@@ -813,9 +822,12 @@ def get_EEI_truth_daily_jd_arrays(EEI_truth_name):
 
     step_minutes = 1 # DO NOT CHANGE - must be equal to the one used for the files in solar_ephemerides
     step_days = step_minutes / (60*24)
-    daily_jd_arrays = [np.arange(mid_day_jd-0.5, mid_day_jd+0.5, step_days) for mid_day_jd in mid_day_jd_array]
+    daily_jd_arrays = [get_day_jd_array(mid_day_jd, step_days) for mid_day_jd in mid_day_jd_array]
     
     return daily_jd_arrays
+
+def get_day_jd_array(mid_day_jd, step_days=1/(60*24)):
+    return np.arange(mid_day_jd-0.5, mid_day_jd+0.5, step_days)
 
 
 def mid_day_jd_array_from_jd_interval(jd_interval):
@@ -833,15 +845,17 @@ def get_mid_day_jd_array(EEI_truth_name):
 #def get_expanded_ae_maps(mode, datestr, Nmax, grid: Grid, normalization):
 def get_expanded_ae_maps(datestr, grid: Grid, rad_config_dict: dict):
 
-    mode = rad_config_dict['sh_mode']
-    Nmax = rad_config_dict['Nmax']
-    normalization = rad_config_dict['sh_normalization']
+    #mode = rad_config_dict['sh_mode']
+    #Nmax = rad_config_dict['Nmax']
     
-    a_sh_map, e_sh_map = rad_settings.get_ae_sh_maps_numpy_new(mode, datestr)
-    a_sh_map = a_sh_map[:, :(Nmax+1), :(Nmax+1)]
-    e_sh_map = e_sh_map[:, :(Nmax+1), :(Nmax+1)]
+    #a_sh_map, e_sh_map = rad_settings.get_ae_sh_maps_numpy_new(mode, datestr)
+    #a_sh_map = a_sh_map[:, :(Nmax+1), :(Nmax+1)]
+    #e_sh_map = e_sh_map[:, :(Nmax+1), :(Nmax+1)]
+
+    a_sh_map, e_sh_map = load_sh_maps(datestr, rad_config_dict)
 
     full_lat, full_lon = grid.stacked_grid_latlon.T
+    normalization = rad_config_dict['sh_normalization']
 
     if 'Albedo' not in rad_config_dict["earth_components"]:
         a_map = np.zeros(grid.n_points)
@@ -856,6 +870,77 @@ def get_expanded_ae_maps(datestr, grid: Grid, rad_config_dict: dict):
         e_map = expand_sh(e_sh_map, full_lon, full_lat, normalization)
 
     return a_map, e_map
+
+
+def load_sh_maps(datestr, rad_config_dict):
+
+    mode = rad_config_dict['sh_mode']
+    Nmax = rad_config_dict['Nmax']
+    
+    a_sh_map, e_sh_map = rad_settings.get_ae_sh_maps_numpy_new(mode, datestr)
+    a_sh_map = a_sh_map[:, :(Nmax+1), :(Nmax+1)]
+    e_sh_map = e_sh_map[:, :(Nmax+1), :(Nmax+1)]
+
+    return a_sh_map, e_sh_map
+
+
+def get_smooth_daily_ae_hist(mid_day_jd, rad_config, grid:Grid=None):
+
+    method=rad_config["time_interp"]
+    if method=="map_interp":
+        assert grid is not None
+        full_lat, full_lon = grid.stacked_grid_latlon.T
+    else:
+        assert method=="sh_interp", "Method must be either 'map_interp' or 'sh_interp'"
+
+    # step 1: load few previous and next days
+    n = 3 # number of days to load to built interpolator
+    jd_array = mid_day_jd + np.arange(-n, n+1, 1)
+    first_jd = rad_config["jd_interval"][0] + 0.5
+    last_jd = rad_config["jd_interval"][1] - 0.5
+    jd_array = np.delete(jd_array, jd_array<first_jd)
+    jd_array = np.delete(jd_array, jd_array>last_jd)
+
+    # step 2: load (and expand?) a&e maps
+    all_a = [None] * len(jd_array)
+    all_e = [None] * len(jd_array)
+
+    for i, jd in enumerate(jd_array):
+        datestr = jd_to_mmddyyyy(jd)
+        a, e = load_sh_maps(datestr, rad_config)
+        if method=="map_interp":
+            a = expand_sh(a, full_lon, full_lat, rad_config['sh_normalization'])
+            e = expand_sh(e, full_lon, full_lat, rad_config['sh_normalization'])
+        all_a[i] = a
+        all_e[i] = e
+
+    # step 3: make splines and interpolate
+    spline_a = make_interp_spline(jd_array, np.stack(all_a), k=3)
+    spline_e = make_interp_spline(jd_array, np.stack(all_e), k=3)
+
+    day_jd_hist = get_day_jd_array(mid_day_jd)
+    day_jd_hist[day_jd_hist < first_jd] = first_jd
+    day_jd_hist[day_jd_hist > last_jd] = last_jd
+
+    a_i_hist = spline_a(day_jd_hist, extrapolate=False)
+    e_i_hist = spline_e(day_jd_hist, extrapolate=False)
+
+    return a_i_hist, e_i_hist
+
+
+def expand_daily_map_hist(sh_hist, grid: Grid, normalization):
+
+    full_lat, full_lon = grid.stacked_grid_latlon.T
+    n_steps = np.shape(sh_hist)[0]
+    map_hist = np.zeros((grid.n_points, n_steps))
+
+    for i in range(n_steps):
+        progress_bar(i, n_steps)
+        map_hist[:,i] = expand_sh(sh_hist[i], full_lon, full_lat, normalization)
+
+    return map_hist
+
+
 
 
 def get_r_sun_day_hist(ephem_tag, mid_day_jd):

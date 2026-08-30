@@ -744,7 +744,8 @@ class Plotter:
         if add_satellite_positions: assert((sat_h_lat_lon_hist_array is not None) and (sat_hist_jd_array is not None))
 
         map_time_step_minutes = np.mean(np.diff(jd_vec)) * 24 * 60
-        sat_hist_steps_minutes = [np.mean(np.diff(sat_jd_vec)) * 24 * 60 for sat_jd_vec in sat_hist_jd_array]
+        if add_satellite_positions or add_groundtracks:
+            sat_hist_steps_minutes = [np.mean(np.diff(sat_jd_vec)) * 24 * 60 for sat_jd_vec in sat_hist_jd_array]
 
         if add_coastlines:
             """
@@ -831,8 +832,9 @@ class Plotter:
             satellite_positions = cls.initialize_satellite_position_scatter(ax)
 
         # prepare satellite location history:
-        all_lon_hist = [h_lat_lon_hist[:,2] for h_lat_lon_hist in sat_h_lat_lon_hist_array]
-        all_lat_hist = [h_lat_lon_hist[:,1] for h_lat_lon_hist in sat_h_lat_lon_hist_array]
+        if add_satellite_positions or add_groundtracks:
+            all_lon_hist = [h_lat_lon_hist[:,2] for h_lat_lon_hist in sat_h_lat_lon_hist_array]
+            all_lat_hist = [h_lat_lon_hist[:,1] for h_lat_lon_hist in sat_h_lat_lon_hist_array]
 
         if add_satellite_positions:
             all_lat_hist_map_steps, all_lon_hist_map_steps = cls.prepare_sat_groundtrack_hist(jd_vec, sat_hist_jd_array, sat_h_lat_lon_hist_array)
@@ -883,7 +885,7 @@ class Plotter:
     
         animation_1 = animation.FuncAnimation(fig, update, frames=np.shape(map_hist)[1], 
                                                 blit=True)
-        animation_1.save(os.path.join(out_dir,filename), fps=16, writer='ffmpeg')
+        animation_1.save(os.path.join(out_dir,filename), fps=24) #, writer='ffmpeg')
         
 
 

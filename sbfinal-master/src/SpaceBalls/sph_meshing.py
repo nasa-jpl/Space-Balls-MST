@@ -44,6 +44,39 @@ class Grid(ABC):
         if self.flattening==0:
             return 4 * np.pi * (RE + self.alt_km)**2
 
+        else:
+            a = (RE + self.alt_km)
+            f = self.flattening
+            e = np.sqrt(f * (2 - f))
+
+            return 2 * np.pi * a**2 * (1 + (1/e - e) * np.arctanh(e))
+
+            # TODO: verify (formula given by Gemini) - wrong! a should have been squared
+            #c = a * (1 - self.flattening)
+            #e = np.sqrt(1 - (c**2 / a**2))
+            #return 2 * np.pi * a**2 * (1 + ((c**2 / (a * e)) * np.arctanh(e)))
+
+    def project_r_vectors_to_elliposoid(self):
+        f = self.flattening
+        lats = np.deg2rad(self.stacked_grid_latlon[:,0])
+        R_corrections = get_r_correction_factors_biaxial_ellipsoid(f, lats)
+        self.stacked_grid_r = self.stacked_grid_r * R_corrections[:,None]
+
+        print(f"r vectors projected to ellipsoid")
+
+    def adjust_integration_weights_to_ellipsoid(self):
+        f = self.flattening
+        lats = np.deg2rad(self.stacked_grid_latlon[:,0])
+        R_corrections = get_r_correction_factors_biaxial_ellipsoid(f, lats)
+
+        e2 = f * (2 - f) # e (eccentricity) squared
+        sqrt_corrections = np.sqrt(1 + (e2 * np.sin(lats) * np.cos(lats) / (e2 * (np.cos(lats))**2 - 1))**2)
+
+        dS_corrections = R_corrections**2 * sqrt_corrections
+        self.integration_weights = self.integration_weights * dS_corrections
+                
+
+
     def compute_surf_integral(self, field_array, average=False):
         field_array = self.vectorize_if_needed(field_array)
         if len(np.shape(field_array))==2:   # axis 1 is time
@@ -104,9 +137,13 @@ class RegularLatLonGrid(Grid):
             self.lon_vec, self.lat_vec, self.lon_edges_vec, self.lat_edges_vec = get_sphere_grid(n_lon, n_lat)
             self.initialize_grid()
 
-            areas = get_spherical_grid_cell_areas(self.lat_edges_vec, self.lon_edges_vec, R=RE+self.alt_km)
+            if self.flattening==0:
+                areas = get_spherical_grid_cell_areas(self.lat_edges_vec, self.lon_edges_vec, R=RE+self.alt_km)
+            else:
+                areas = get_ellipsoid_grid_cell_areas(self.lat_edges_vec, self.lon_edges_vec, f=self.flattening, Req=RE+self.alt_km)
+
             self.integration_weights = np.reshape(areas, (self.n_lat * self.n_lon))
-        
+
         elif (lmax is not None) and (quad_type is not None) and (n_lat is None) and (n_lon is None): 
             
             assert(quad_type=="GLQ") # it seems that DH is basically equispaced
@@ -127,33 +164,38 @@ class RegularLatLonGrid(Grid):
 
             pysh_lat_weigths = pysh_grid.weights
             areas = get_spherical_grid_cell_areas(self.lat_edges_vec, self.lon_edges_vec, R=RE+self.alt_km)
+            sph_area = 4 * np.pi * (RE+self.alt_km)**2
             #lat_band_areas = np.sum(areas, axis=1)
             weights_array = np.zeros_like(areas)
             for i, w_i in enumerate(pysh_lat_weigths):
-                weights_array[i] = np.ones(self.n_lon) * w_i * self.total_area / (2 * self.n_lon)
+                #weights_array[i] = np.ones(self.n_lon) * w_i * self.total_area / (2 * self.n_lon)
+                weights_array[i] = np.ones(self.n_lon) * w_i * sph_area / (2 * self.n_lon)
             
             self.integration_weights = np.reshape(weights_array, (self.n_lat * self.n_lon))
-
-
+            if self.flattening != 0:
+                self.adjust_integration_weights_to_ellipsoid()
 
         else:
             print("Wrong initialization of Regular LatLonGrid!")
-        
+
+        #self.adjust_integration_weights_to_ellipsoid()
             
     def initialize_grid(self):
 
         self.n_lat = len(self.lat_vec)
         self.n_lon = len(self.lon_vec)
         
-        if self.flattening == 0:  # for now
-            self.stacked_grid_r, self.stacked_grid_u = get_stacked_spherical_grid_els(
-                self.lon_vec, self.lat_vec, 
-                self.alt_km, total_R=RE+self.alt_km)
-            
-            lon_mesh_vectd, lat_mesh_vectd, _ = get_reshaped_grid(self.lon_vec, self.lat_vec)
-            self.stacked_grid_latlon = np.column_stack((lat_mesh_vectd, lon_mesh_vectd))
+        #if self.flattening == 0:  # for now
+        self.stacked_grid_r, self.stacked_grid_u = get_stacked_spherical_grid_els(
+            self.lon_vec, self.lat_vec, 
+            self.alt_km, total_R=RE+self.alt_km)
+        
+        lon_mesh_vectd, lat_mesh_vectd, _ = get_reshaped_grid(self.lon_vec, self.lat_vec)
+        self.stacked_grid_latlon = np.column_stack((lat_mesh_vectd, lon_mesh_vectd))
 
-            self.n_points = len(self.stacked_grid_r)
+        self.n_points = len(self.stacked_grid_r)
+        if self.flattening != 0:
+            self.project_r_vectors_to_elliposoid()
     
     def reshape_if_needed(self, field_array):
         shape = np.shape(field_array)
@@ -212,27 +254,31 @@ class QuadratureGrid(Grid):
 
     def initialize_grid(self):
 
-        if self.flattening == 0:
-            if (self.order <= 131) and not(self.default_womersley): 
-                from scipy.integrate import lebedev_rule  # not available in the scipy version of monte168
-                u_el, weights = lebedev_rule(self.order) # 131 is maximum available in scipy
-                self.n_points = len(weights)
-            else:
-                all_fnames = os.listdir(os.path.join(CONFIG_DIR, 'maths','spherical_designs_womersley'))
-                fname = [f for f in all_fnames if f"ss{self.order:03d}" in f]
-                assert len(fname)==1
-                u_el = np.loadtxt(os.path.join(CONFIG_DIR, 'maths','spherical_designs_womersley',fname[0])).T
-                self.n_points = np.shape(u_el)[1]
-                weights = np.ones(self.n_points) * (4 * np.pi) / self.n_points
-                #raise NotImplementedError("Orders > 131 not implemented")
-            
-            self.stacked_grid_u = np.transpose(u_el)
-            self.stacked_grid_r = self.stacked_grid_u * (RE + self.alt_km)
-            
-            (_, all_lat, all_lon) = cartesian_to_spherical(u_el[0, :], u_el[1, :], u_el[2, :])
-            self.stacked_grid_latlon = np.column_stack((all_lat.deg, all_lon.deg))
-            self.integration_weights = weights * (RE + self.alt_km)**2
-            #self.n_points = len(self.integration_weights)
+        #if self.flattening == 0:
+        if (self.order <= 131) and not(self.default_womersley): 
+            from scipy.integrate import lebedev_rule  # not available in the scipy version of monte168
+            u_el, weights = lebedev_rule(self.order) # 131 is maximum available in scipy
+            self.n_points = len(weights)
+        else:
+            all_fnames = os.listdir(os.path.join(CONFIG_DIR, 'maths','spherical_designs_womersley'))
+            fname = [f for f in all_fnames if f"ss{self.order:03d}" in f]
+            assert len(fname)==1
+            u_el = np.loadtxt(os.path.join(CONFIG_DIR, 'maths','spherical_designs_womersley',fname[0])).T
+            self.n_points = np.shape(u_el)[1]
+            weights = np.ones(self.n_points) * (4 * np.pi) / self.n_points
+            #raise NotImplementedError("Orders > 131 not implemented")
+        
+        self.stacked_grid_u = np.transpose(u_el)
+        self.stacked_grid_r = self.stacked_grid_u * (RE + self.alt_km)
+        
+        (_, all_lat, all_lon) = cartesian_to_spherical(u_el[0, :], u_el[1, :], u_el[2, :])
+        self.stacked_grid_latlon = np.column_stack((all_lat.deg, all_lon.deg))
+        self.integration_weights = weights * (RE + self.alt_km)**2
+        #self.n_points = len(self.integration_weights)
+
+        if self.flattening != 0:
+            self.project_r_vectors_to_elliposoid()
+            self.adjust_integration_weights_to_ellipsoid()
 
     def recompute_grid(self, r_sat):
         pass
@@ -258,23 +304,26 @@ class KnockeGridMONTE(Grid):
         self.initialize_grid(r_sat_0)
 
     def initialize_grid(self, r_sat_0):
-        if self.flattening == 0:
-            _, _, all_ring_centers, all_element_areas_at_ring = get_monte_mesh(r_sat_0, self.n_rings, alt_km=self.alt_km)
-            self.stacked_grid_r = np.hstack(all_ring_centers).T
-            self.stacked_grid_u = self.stacked_grid_r / (RE + self.alt_km)
+        #if self.flattening == 0:
+        _, _, all_ring_centers, all_element_areas_at_ring = get_monte_mesh(r_sat_0, self.n_rings, alt_km=self.alt_km)
+        self.stacked_grid_r = np.hstack(all_ring_centers).T
+        self.stacked_grid_u = self.stacked_grid_r / (RE + self.alt_km)
 
-            n_els_per_ring = [len(ring_mat.T) for ring_mat in all_ring_centers]
-            areas = np.repeat(all_element_areas_at_ring, n_els_per_ring) # should all be equal
-            self.integration_weights = areas
-            self.n_points = len(areas)
+        n_els_per_ring = [len(ring_mat.T) for ring_mat in all_ring_centers]
+        areas = np.repeat(all_element_areas_at_ring, n_els_per_ring) # should all be equal
+        self.integration_weights = areas
+        self.n_points = len(areas)
 
-            (_, all_lat, all_lon) = cartesian_to_spherical(self.stacked_grid_u[:, 0], 
-                                                           self.stacked_grid_u[:, 1], 
-                                                           self.stacked_grid_u[:, 2])
-            self.stacked_grid_latlon = np.column_stack((all_lat.deg, all_lon.deg))
+        (_, all_lat, all_lon) = cartesian_to_spherical(self.stacked_grid_u[:, 0], 
+                                                        self.stacked_grid_u[:, 1], 
+                                                        self.stacked_grid_u[:, 2])
+        self.stacked_grid_latlon = np.column_stack((all_lat.deg, all_lon.deg))
+        if self.flattening != 0:
+            self.project_r_vectors_to_elliposoid()
+            self.adjust_integration_weights_to_ellipsoid()
 
-        else:
-            raise NotImplementedError("Knocke MONTE grid is only defined for perfectly spherical TOA")
+        #else:
+        #    raise NotImplementedError("Knocke MONTE grid is only defined for perfectly spherical TOA")
 
     def recompute_grid(self, r_sat):
         #print(f"Recomputing Knocke grid at {r_sat}")
@@ -343,6 +392,9 @@ def fit_sh_field(y_vec, lon_vec, lat_vec, lmax):
     
     return sh_set
 
+def get_r_correction_factors_biaxial_ellipsoid(f, lats):
+    return (1-f) / np.sqrt((1-f)**2 * (np.cos(lats))**2 + (np.sin(lats))**2)
+
 
 # deprecated function
 def get_cell_samples_in_regular_grid(lat_hist_vec, lon_hist_vec, x_hist_vec, n_lon=360, n_lat=180):  # TODO: optimize and make it a mehtod of the above classes
@@ -410,6 +462,31 @@ def get_spherical_grid_cell_areas(lat_edges, lon_edges, R=constants.earth_radius
     # same result as with the double for loop (within 1e-14 rel. diff.) and ~500 times faster
     
     return areas_grid
+
+def get_ellipsoid_grid_cell_areas(lat_edges, lon_edges, f, Req=constants.earth_radius()):
+
+    lat_edges = np.radians(lat_edges)
+    lon_edges = np.radians(lon_edges)
+    F_lat_vec = F_lambda_function(f, lat_edges)
+    diff_F_lat_vec = np.diff(F_lat_vec)
+    diff_lon_lat_vec = np.diff(lon_edges)
+    areas_grid = Req**2 / 2 * np.abs(np.outer(diff_F_lat_vec, diff_lon_lat_vec))
+
+    return areas_grid
+
+
+
+def F_lambda_function(f, lats):
+    assert(f>0)
+
+    e2 = f * (2 - f)
+    q = (1 - f)**2
+    A = e2 * (2 - e2)
+    e = np.sqrt(e2)
+    x = np.sin(lats)
+    B = np.sqrt(q**2 + A*x**2)
+
+    return x * B / (q + e2 * x**2) + (q/e) * np.arctanh(e * x / B)
 
 
 def get_stacked_spherical_grid_els(lon_vec, lat_vec, altitude_km, total_R):
@@ -805,7 +882,8 @@ def expand_sh(sh_map, evaluation_lon_vec, evaluation_lat_vec, normalization):
     """
     
     eval_coeffs = pysh.SHCoeffs.from_array(sh_map, normalization=normalization).expand(
-                                        lon=evaluation_lon_vec, lat=evaluation_lat_vec)
+                                        lon=evaluation_lon_vec, lat=evaluation_lat_vec, 
+                                        backend='ducc', nthreads=10)
     return eval_coeffs
 
 

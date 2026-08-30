@@ -5,6 +5,7 @@ import numpy as np
 import scipy.signal, scipy.interpolate, scipy.fft
 import json
 import hashlib
+from astropy.time import Time
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR, INPUT_DIR, OUTPUT_DIR
 
 
@@ -1028,3 +1029,7 @@ def notch_filter(t, y, f0, Q=30):
     y_filtered = filtfilt(b, a, y)
 
     return y_filtered
+
+
+def jd_to_mmddyyyy(jd):
+    return Time(jd, format='jd').to_datetime().strftime("%Y-%m-%d")

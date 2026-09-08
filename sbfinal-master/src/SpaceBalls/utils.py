@@ -513,6 +513,11 @@ def ensure_180_to_180(lon_vec):
     a = np.asarray(lon_vec)
     return a - 360 * (a > 180)
 
+
+def get_norm_across_last_dim(array):
+    return np.sqrt(np.einsum('...j,...j->...', array, array)) # generally faster than np.linalg.norm()
+
+
 def get_all_r_rel(stacked_r_el_1, stacked_r_el_2, dim_to_loop=None):
 
     # full broadcast method seems to be the fastest even for a 20+GB resulting array (factor 3-5)

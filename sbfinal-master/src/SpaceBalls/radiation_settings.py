@@ -90,7 +90,7 @@ def get_CS_mats(type_str, date_str, Nmax_file, Nmax_crop, mode="historic_SYN1deg
 
 
 
-def get_a_and_e_sh_maps(datestring, rad_config_dict):
+def get_a_and_e_sh_maps(datestring, rad_config_dict: dict):
     
         albedo_types = rad_config_dict["earth_components"]
         Nmax_file = 2 if rad_config_dict["sh_mode"]=="default" else 50  # TODO: hard-coded, TBD

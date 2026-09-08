@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 #import stripy.spherical
 
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR
-from SpaceBalls.utils import get_two_perp_unit_vectors, progress_bar, get_pairwise_midpoints
+from SpaceBalls.utils import get_two_perp_unit_vectors, progress_bar, get_pairwise_midpoints, get_norm_across_last_dim
 #from SpaceBalls.plotter import Plotter
 sys.path.insert(0, str(CONFIG_DIR.parent)) 
 import config.constants as constants
@@ -38,6 +38,7 @@ class Grid(ABC):
         self.stacked_grid_u = None
         self.stacked_grid_latlon = None
         self.n_points = None
+        self.r_projected_to_ellipsoid = False
         # Additional common attributes can be added here if needed
 
     def compute_total_area(self):
@@ -61,8 +62,17 @@ class Grid(ABC):
         lats = np.deg2rad(self.stacked_grid_latlon[:,0])
         R_corrections = get_r_correction_factors_biaxial_ellipsoid(f, lats)
         self.stacked_grid_r = self.stacked_grid_r * R_corrections[:,None]
+        self.r_projected_to_ellipsoid = True
 
         print(f"r vectors projected to ellipsoid")
+
+    def adjust_u_vectors_to_ellipsoid(self):
+        assert(self.r_projected_to_ellipsoid)
+        f = self.flattening
+        denominator_adjustment = np.array([1, 1, (1-f)**2])
+        new_u = self.stacked_grid_r / denominator_adjustment[None,:]
+        self.stacked_grid_u = new_u / get_norm_across_last_dim(new_u)[...,None]
+        
 
     def adjust_integration_weights_to_ellipsoid(self):
         f = self.flattening
@@ -196,6 +206,7 @@ class RegularLatLonGrid(Grid):
         self.n_points = len(self.stacked_grid_r)
         if self.flattening != 0:
             self.project_r_vectors_to_elliposoid()
+            self.adjust_u_vectors_to_ellipsoid()
     
     def reshape_if_needed(self, field_array):
         shape = np.shape(field_array)
@@ -278,6 +289,7 @@ class QuadratureGrid(Grid):
 
         if self.flattening != 0:
             self.project_r_vectors_to_elliposoid()
+            self.adjust_u_vectors_to_ellipsoid()
             self.adjust_integration_weights_to_ellipsoid()
 
     def recompute_grid(self, r_sat):
@@ -320,6 +332,7 @@ class KnockeGridMONTE(Grid):
         self.stacked_grid_latlon = np.column_stack((all_lat.deg, all_lon.deg))
         if self.flattening != 0:
             self.project_r_vectors_to_elliposoid()
+            self.adjust_u_vectors_to_ellipsoid()
             self.adjust_integration_weights_to_ellipsoid()
 
         #else:

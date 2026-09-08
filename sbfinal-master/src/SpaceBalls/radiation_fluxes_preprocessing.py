@@ -13,7 +13,7 @@ import SpaceBalls.radiation_settings as rad_settings
 from SpaceBalls.sph_meshing import Grid, RegularLatLonGrid, QuadratureGrid, expand_sh, field_hist_rotation_multiproc
 
 import config.constants as constants
-from SpaceBalls.utils import get_all_r_rel, get_all_cos_alpha, get_r_rel_norm, progress_bar, jd_to_mmddyyyy
+from SpaceBalls.utils import get_norm_across_last_dim, progress_bar, jd_to_mmddyyyy
 from SpaceBalls.plotter import Plotter
 
 AU = constants.astronomical_unit(units='km')
@@ -534,7 +534,7 @@ def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid: Grid, t
     TSI_grid_day_vec = TSI_1AU_day * (AU/grid_d_sun_hist)**2
     grid_u_sun_hist = get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist)
 
-    if grid.alt_km==0: # TODO: what if we define TOA at 20 or other low altitudes? Make robust...
+    if grid.alt_km<=20: # TODO: what if we define TOA at 20 or other low altitudes? Make robust...
         # # Old version:
         zeroed_cos_theta_s_day_hist = get_zeroed_cos_theta_s_hist(grid_u_sun_hist, grid, earth_f=0)#toa_grid.flattening)
         grid_u_sun_hist_filtered = grid_u_sun_hist * (zeroed_cos_theta_s_day_hist[...,None]!=0)  # filter out eclipse
@@ -637,10 +637,10 @@ def compute_F_hist_at_sat_r_hist(EEI_truth_name, sat_r_hist, sat_jd_hist, toa_gr
 
     erp_F_LW_hist, erp_F_SW_hist = compute_earth_F_at_altitude(sat_jd_hist, rad_config, 
                                              sat_r_hist[None,...], toa_grid,
-                                             store_dF=True, wavelength="split")
+                                             store_dF=False, wavelength="split")
     print(np.shape(erp_F_LW_hist))
-    erp_F_LW_hist = np.sum(erp_F_LW_hist, axis=1)
-    erp_F_SW_hist = np.sum(erp_F_SW_hist, axis=1)
+    #erp_F_LW_hist = np.sum(erp_F_LW_hist, axis=1)
+    #erp_F_SW_hist = np.sum(erp_F_SW_hist, axis=1)
 
     print("done")
 
@@ -718,9 +718,6 @@ def get_grid_r_sun_hist(r_sun_day, stacked_r):
 
     return grid_r_sun_hist, grid_d_sun_hist
 
-def get_norm_across_last_dim(array):
-    return np.sqrt(np.einsum('...j,...j->...', array, array)) # generally faster than np.linalg.norm()
-
 
 def get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist):
 
@@ -731,16 +728,17 @@ def get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist):
 def get_zeroed_cos_theta_s_hist(grid_u_sun_hist, grid: Grid, earth_f=None): # toa_grid: Grid
     # grid_u_sun_hist: unit vectors pointing FROM each grid point TO the Sun at every time step
     # earth_f: Earth flattening - only needed in case grid is at altitude (to properly compute shadows)
-    if grid.alt_km != 0: assert(earth_f is not None)
+    if grid.alt_km > 20: assert(earth_f is not None)
 
     stacked_cos_theta_s_hist = np.einsum('itk,ik->it', grid_u_sun_hist, grid.stacked_grid_u) # same as: np.sum(grid_u_sun_hist * grid.stacked_grid_u[:,:,None], axis=1)
 
-    if (grid.alt_km != 0) and (earth_f != 0): # TODO: will this be necessary at all? (Compute vector F instead)
+    if (grid.alt_km > 20) and (earth_f != 0): # TODO: will this be necessary at all? (Compute vector F instead)
         NotImplementedError()
     else:
-        # valid for both TOA and altitude grid with spherical Earth
-        cos_lim = get_cos_theta_s_lim(grid.alt_km)
-        stacked_cos_theta_s_hist[stacked_cos_theta_s_hist < cos_lim] = 0 # no partial shadow, constant altitude
+        # Now valid just for TOA grids (general cos_lim breaks if TOA alt is <0, and for altitude we compute eclipse more accurately now anyway)
+        # cos_lim = get_cos_theta_s_lim(grid.alt_km)
+        cos_lim = 0
+        stacked_cos_theta_s_hist[stacked_cos_theta_s_hist < cos_lim] = 0
     
     return stacked_cos_theta_s_hist
 

@@ -5,7 +5,10 @@ from SpaceBalls.paths import CONFIG_DIR
 sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
 
 
-def get_TSI_1AU(jD, TSI_source):
+def get_TSI_1AU(jD, TSI_source, day_interp="step"): # this function already interpolates (linearly) - Do we want higher order?
+
+    if day_interp=="step":
+        jD = np.round(jD)
     
     if TSI_source=="LASP":
         TSI_mat = np.loadtxt(os.path.join(CONFIG_DIR, 'TSI', 'TSI_LASP.txt'), skiprows=133)
@@ -41,7 +44,7 @@ def get_TSI_1AU(jD, TSI_source):
         solar_energy_1AU = np.interp(jD, jd_vec, TSI_mat[:,1]) # TSI_mat[idx, 1][0][0]
         
         return solar_energy_1AU
-    
+
 
 def get_reduced_matrix(M_in, Nmax):
     M_aux = M_in.slice(0, Nmax).transpose()
@@ -262,7 +265,7 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
 
     elif EEI_truth_name=="EEI_truth_35":
-        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["TSI_source"] = "CERES" # to add: TSI_interp: "step (default)", "linear", "cubic"
         rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
         rad_config_dict["sh_mode"] = "historic_SYN1deg"
         rad_config_dict["sh_normalization"] = "unnorm"
@@ -271,6 +274,20 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["ephemerides"] = "boa_0"
         rad_config_dict["earth_shape"] = "spherical"    
         rad_config_dict["time_interp"] = "map_interp" # "sh_interp"
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+
+    elif EEI_truth_name=="EEI_truth_4":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "SYN1deg_fine"
+        rad_config_dict["sh_normalization"] = "4pi"
+        rad_config_dict["Nmax"] = 179
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"
+        rad_config_dict["time_interp"] = "map_interp" # "sh_interp" # 
+        rad_config_dict["ADM_model"] = "ERBE" # "sh_interp" # 
+                
         # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
         
     else:

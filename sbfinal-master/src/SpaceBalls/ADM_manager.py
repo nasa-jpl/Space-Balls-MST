@@ -42,6 +42,9 @@ def _centres(upper):
 SZA_CENTRES = _centres(SZA_UPPER)
 VZA_CENTRES = _centres(VZA_UPPER)
 RAA_CENTRES = _centres(RAA_UPPER)
+COLAT_UPPER = np.arange(18., 181., 18.)
+COLAT_CENTRES = _centres(COLAT_UPPER)
+_LW_LUT_SHAPE = (4, 12, 7, 10)  # season, scene, VZA, colatitude
 
 
 def _numbers(line: str) -> list[float]:
@@ -337,6 +340,125 @@ def load_erbe_sw_adm(table_path: str | Path) -> ERBEShortwaveADM:
     return _load_cached(str(Path(table_path).expanduser().resolve()))
 
 
+def _parse_lw_table(table_path: Path) -> np.ndarray:
+    """Read the bundled season/scene blocks, validating all angular bounds."""
+    values = np.empty(_LW_LUT_SHAPE, dtype=np.float64)
+    season = scene = -1
+    vza = 7
+    row_pattern = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s+(.+)$")
+    colat_bounds = np.column_stack((np.r_[0, COLAT_UPPER[:-1]], COLAT_UPPER)).ravel()
+    for lineno, line in enumerate(table_path.read_text(encoding="ascii").splitlines(), 1):
+        stripped = line.strip()
+        try:
+            if stripped.startswith("SEASON "):
+                if season >= 0 and (scene != 11 or vza != 7):
+                    raise ValueError("incomplete season")
+                season += 1
+                if season >= 4 or int(stripped.split()[1]) != season + 1:
+                    raise ValueError("unexpected season ID or order")
+                scene = -1
+            elif stripped.startswith("Scene "):
+                if season < 0 or vza != 7:
+                    raise ValueError("missing season or incomplete scene")
+                scene += 1
+                if scene >= 12 or int(stripped.split()[1]) != scene + 1:
+                    raise ValueError("unexpected scene ID or order")
+                vza = 0
+            elif (match := row_pattern.match(line)) is not None:
+                lower, upper = map(int, match.group(1, 2))
+                if (lower, upper) == (0, 18):
+                    if not np.array_equal(_numbers(line), colat_bounds):
+                        raise ValueError("unexpected colatitude column bounds")
+                    continue
+                expected_lower = 0.0 if vza == 0 else VZA_UPPER[vza - 1]
+                if (season < 0 or scene < 0 or vza >= 7
+                        or lower != expected_lower or upper != VZA_UPPER[vza]):
+                    raise ValueError("unexpected VZA bounds or row order")
+                factors = [float(token.replace("D", "E").replace("d", "e"))
+                           for token in match.group(3).split()]
+                if len(factors) != 10:
+                    raise ValueError("expected ten colatitude factors")
+                values[season, scene, vza] = factors
+                vza += 1
+        except (ValueError, IndexError) as exc:
+            raise ValueError(f"Invalid ERBE LW ADM table {table_path}, line {lineno}: {exc}") from exc
+    if (season, scene, vza) != (3, 11, 7):
+        raise ValueError(f"Incomplete ERBE LW ADM table in {table_path}.")
+    return values
+
+
+@dataclass(frozen=True)
+class ERBELongwaveADM:
+    values: np.ndarray
+
+    def __post_init__(self):
+        values = np.array(self.values, dtype=np.float64, copy=True, order="C")
+        if values.shape != _LW_LUT_SHAPE:
+            raise ValueError(f"Expected table shape {_LW_LUT_SHAPE}; got {values.shape}.")
+        if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError("ERBE LW ADM factors must be finite and strictly positive.")
+        values.setflags(write=False)
+        object.__setattr__(self, "values", values)
+
+    def factors(self, viewing_zenith_angles, colatitudes, scene_types, seasons, *,
+                method="nearest", scene_index_base=1, out_of_range="clip"):
+        """Return LW factors for broadcast-compatible arrays (including selected cells).
+
+        Angles are degrees; colatitude runs from 0 at the North Pole to 180
+        at the South Pole. Seasons are 1=DJF, 2=MAM, 3=JJA, 4=SON in both
+        hemispheres. Scene IDs default to 1–12. ``nearest`` selects containing
+        bins, with exact upper bounds in the lower bin. ``linear`` interpolates
+        VZA/colatitude at bin centres, clamping outside the outer centres;
+        seasons and scenes remain categorical. Visibility is masked upstream.
+        """
+        if method not in ("nearest", "linear"):
+            raise ValueError("method must be 'nearest' or 'linear'.")
+        if scene_index_base not in (0, 1):
+            raise ValueError("scene_index_base must be 0 or 1.")
+        vza, colat, scenes, seasons = np.broadcast_arrays(
+            np.asarray(viewing_zenith_angles, dtype=float),
+            np.asarray(colatitudes, dtype=float),
+            np.asarray(scene_types), np.asarray(seasons))
+        if not np.all(np.isfinite(vza)) or not np.all(np.isfinite(colat)):
+            raise ValueError("Angles must be finite.")
+        if out_of_range == "clip":
+            vza, colat = np.clip(vza, 0, 90), np.clip(colat, 0, 180)
+        elif out_of_range == "raise":
+            if np.any((vza < 0) | (vza > 90)) or np.any((colat < 0) | (colat > 180)):
+                raise ValueError("VZA must lie in [0, 90] and colatitude in [0, 180].")
+        else:
+            raise ValueError("out_of_range must be 'clip' or 'raise'.")
+        if (not np.all(np.isfinite(scenes)) or not np.all(scenes == np.rint(scenes))
+                or np.any((scenes < scene_index_base) | (scenes >= scene_index_base + 12))):
+            raise ValueError("scene_types must be integer-valued ERBE scene IDs.")
+        if (not np.all(np.isfinite(seasons)) or not np.all(seasons == np.rint(seasons))
+                or np.any((seasons < 1) | (seasons > 4))):
+            raise ValueError("seasons must be integers in [1, 4].")
+        scene_i = scenes.astype(np.intp) - scene_index_base
+        season_i = seasons.astype(np.intp) - 1
+        if method == "nearest":
+            v = np.searchsorted(VZA_UPPER, vza, side="left")
+            c = np.searchsorted(COLAT_UPPER, colat, side="left")
+            return self.values[season_i, scene_i, v, c]
+        v0, v1, wv = _brackets(vza, VZA_CENTRES)
+        c0, c1, wc = _brackets(colat, COLAT_CENTRES)
+        lower = ((1 - wc) * self.values[season_i, scene_i, v0, c0]
+                 + wc * self.values[season_i, scene_i, v0, c1])
+        upper = ((1 - wc) * self.values[season_i, scene_i, v1, c0]
+                 + wc * self.values[season_i, scene_i, v1, c1])
+        return (1 - wv) * lower + wv * upper
+
+
+@lru_cache(maxsize=None)
+def _load_lw_cached(resolved_path: str) -> ERBELongwaveADM:
+    return ERBELongwaveADM(_parse_lw_table(Path(resolved_path)))
+
+
+def load_erbe_lw_adm(table_path: str | Path) -> ERBELongwaveADM:
+    """Load and parse an LW table only once per canonical path."""
+    return _load_lw_cached(str(Path(table_path).expanduser().resolve()))
+
+
 def anisotropic_factors(
     solar_zenith_angles,
     viewing_zenith_angles,
@@ -449,8 +571,7 @@ def get_erbe_scene_types(jd_array, toa_grid: Grid, rad_config: dict):
     
 
 def get_ceres_cloud_fractions(out_jd_array, toa_grid: Grid, rad_config: dict):
-    # TODO: check that this works
-
+    
     n = 2 # number of days to load to built interpolator
     jd_interp = get_jd_to_build_interp(n, out_jd_array, rad_config["jd_interval"])
 

@@ -15,13 +15,14 @@ from SpaceBalls.sph_meshing import Grid, RegularLatLonGrid, QuadratureGrid, expa
 import config.constants as constants
 from SpaceBalls.utils import get_norm_across_last_dim, progress_bar, jd_to_mmddyyyy, get_jd_to_build_interp
 from SpaceBalls.plotter import Plotter
-from SpaceBalls.ADM_manager import load_erbe_sw_adm, get_erbe_scene_types
+from SpaceBalls.ADM_manager import load_erbe_sw_adm, get_erbe_scene_types, load_erbe_lw_adm
 
 AU = constants.astronomical_unit(units='km')
 RE = constants.earth_radius(units='km')
 STEP_MINUTES = 1 # DO NOT CHANGE - must be equal to the one used for the files in solar_ephemerides
 ERBE_SW_ADM = load_erbe_sw_adm(os.path.join(CONFIG_DIR, 'earth', 'ADMs', 'erbe_SW_ADM.dat'))
-
+ERBE_LW_ADM = load_erbe_lw_adm(os.path.join(CONFIG_DIR, 'earth', 'ADMs', 'erbe_LW_ADM.dat'))
+            
 REQUIRED_FILES = {
     "toa": ['daily_hist_LW_toa', 'daily_hist_SW_toa', 'daily_hist_net_toa', 'daily_hist_net_toa_SFF_accurate',
             'daily_avg_net_toa', 'daily_hist_net_toa_surf_avg', # 'daily_hist_net_toa_lat_avg'
@@ -427,10 +428,14 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
         np.maximum(geometric_kernel, 0, out=geometric_kernel) # set negative cosines(alpha) to zero
             # 4. Compute flux vector integral
         print(f"Getting ADMs...")
-        LW_I_to_L_map = get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid, rad_config, 
-                                                    rad_type="LW", ADM_model=ADM_model) # shape (np, np_toa, n_steps)
-        SW_I_to_L_map = get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid, rad_config, 
-                                                        rad_type="SW", ADM_model=ADM_model) 
+        # LW_I_to_L_map = get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid, rad_config, 
+        #                                             rad_type="LW", ADM_model=ADM_model) # shape (np, np_toa, n_steps)
+        # SW_I_to_L_map = get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid, rad_config, 
+        #                                                 rad_type="SW", ADM_model=ADM_model) 
+        LW_I_to_L_map, SW_I_to_L_map = get_irradiance_to_radiance_map(
+            r_rel, r_rel_norm_2, geometric_kernel, jd_array,
+            toa_grid, rad_config, ADM_model=ADM_model, rad_type="both"
+        )
 
         if wavelength=="split":
             emission_F_LW_hist[i], emission_F_SW_hist[i] = (
@@ -960,80 +965,100 @@ def irradiance_to_radiance(emission_hist, rad_type, r_alt=None, toa_grid_u_sun_h
     if ADM_model is None: # Lambertian emission model
         return (1/np.pi) * emission_hist
 
-def get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid: Grid, rad_config: dict, 
-                                   rad_type: str, ADM_model=None):
+def get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid: Grid, rad_config: dict,
+                                   rad_type: str = "both", ADM_model=None):
+    """Return irradiance-to-radiance factors, sharing geometry and scenes by band.
 
-    # INPUTS:
-    # r_rel:        shape (np, np_toa, n_steps_r, 3) - n_steps_r can be either 1 or n_steps
-    # jd_array:     shape (n_steps,) NOTE about convention used: Jan 1st 2018 (00:00) is 2458119.5
-    # toa_grid:     stacked_grid_r has shape (np_toa, 3)
+    ``rad_type="both"`` (default) returns ``(LW_map, SW_map)``; ``"LW"`` or
+    ``"SW"`` returns just that map. With no ADM model, each result is the
+    Lambertian scalar 1/pi. Otherwise ERBE maps have shape (np, n_toa, nt),
+    even for static geometry (r_rel's time axis may have length 1 or nt).
+    Invisible cells are zero in both maps; night-side cells are zero only
+    in SW. ``rad_config['ADM_interp']`` selects nearest bins (default) or
+    linear angular interpolation. LW seasons are DJF/MAM/JJA/SON, selected
+    from each Julian date, and colatitude comes from the TOA grid latitude.
+    """
+    if not isinstance(rad_type, str) or rad_type.lower() not in ("both", "lw", "sw"):
+        raise ValueError("rad_type must be 'both', 'LW', or 'SW'.")
+    rad_type = rad_type.lower()
+    use_lw, use_sw = rad_type != "sw", rad_type != "lw"
     n_steps_r = np.shape(r_rel)[2]
     n_steps = len(jd_array)
-    assert((n_steps_r==1) or (n_steps_r==n_steps))
+    assert (n_steps_r == 1) or (n_steps_r == n_steps)
 
     if ADM_model is None:
-        return (1/np.pi)
+        return (1 / np.pi, 1 / np.pi) if rad_type == "both" else 1 / np.pi
 
-    else:
-        if rad_type.lower()=="sw":
-            # Sun stuff only for SW
-            # # TODO: make sun stuff an external function to be called by the other methods that include duplication of this routine
-            r_sun_hist = get_r_sun_jd_hist(rad_config, jd_array)
-            _, _, toa_grid_u_sun_hist = get_grid_r_sun_hist(r_sun_hist, toa_grid.stacked_grid_r) #grid)
-            zeroed_cos_theta_s_hist = get_zeroed_cos_theta_s_hist(toa_grid_u_sun_hist, toa_grid)
+    shape = (r_rel.shape[0], toa_grid.n_points, n_steps)
+    lw_map = np.zeros(shape, dtype=float) if use_lw else None
+    sw_map = np.zeros(shape, dtype=float) if use_sw else None
+    cell_filter = np.broadcast_to(geometric_kernel != 0, shape)
+    if use_sw and np.any(cell_filter):
+        r_sun_hist = get_r_sun_jd_hist(rad_config, jd_array)
+        _, _, toa_grid_u_sun_hist = get_grid_r_sun_hist(r_sun_hist, toa_grid.stacked_grid_r)
+        zeroed_cos_theta_s_hist = get_zeroed_cos_theta_s_hist(toa_grid_u_sun_hist, toa_grid)
+        if not use_lw:
+            cell_filter = cell_filter & (zeroed_cos_theta_s_hist[None, :, :] != 0)
 
-            lw_cell_filter = (geometric_kernel != 0)
-            sw_cell_filter = lw_cell_filter & (zeroed_cos_theta_s_hist[None,:,:] != 0)
+    observer_idx, toa_idx, time_idx = np.nonzero(cell_filter)
+    del cell_filter
+    if observer_idx.size:
+        # Select visible cells once for both bands; static geometry is indexed
+        # at time zero without allocating a tiled vector array.
+        geometry_time_idx = 0 if n_steps_r == 1 else time_idx
+        selected_r_rel = r_rel[observer_idx, toa_idx, geometry_time_idx]
+        selected_grid_u = toa_grid.stacked_grid_u[toa_idx]
+        r_rel_dot_grid_u = np.einsum('ik,ik->i', selected_r_rel, selected_grid_u)
+        cos_theta_v = r_rel_dot_grid_u / np.sqrt(
+            r_rel_norm_2[observer_idx, toa_idx, geometry_time_idx])
+        viewing_zenith_angles = np.rad2deg(np.arccos(np.clip(cos_theta_v, -1, 1)))
+        del cos_theta_v
+        # Scene classification and cloud interpolation are shared by observers
+        # and by SW/LW; only selected cells enter the ADM lookups.
+        scene_types = get_erbe_scene_types(jd_array, toa_grid, rad_config)
+        method = rad_config.get('ADM_interp', 'nearest')
 
-            # Keep the caller's dense output, but compute only the K visible,
-            # sunlit entries. Excluded cells contribute zero to the flux integral.
-            sw_map = np.zeros(sw_cell_filter.shape, dtype=float)
-            observer_idx, toa_idx, time_idx = np.nonzero(sw_cell_filter)
-            del lw_cell_filter, sw_cell_filter
-            if observer_idx.size == 0:
-                return sw_map
+        if use_lw:
+            months = np.asarray(Time(jd_array, format='jd').ymdhms.month)
+            seasons = (months % 12) // 3 + 1
+            colatitudes = 90.0 - toa_grid.stacked_grid_latlon[:, 0]
+            factors = ERBE_LW_ADM.factors(
+                viewing_zenith_angles, colatitudes[toa_idx],
+                scene_types[toa_idx, time_idx], seasons[time_idx], method=method)
+            factors *= 1 / np.pi
+            lw_map[observer_idx, toa_idx, time_idx] = factors
+            del factors
 
-            # Any number of observers is supported. For time-varying geometry,
-            # select each cell's time_idx; if the time axis has length 1, reuse
-            # time index 0 for each observer without tiling the geometry.
-            geometry_time_idx = 0 if n_steps_r == 1 else time_idx
-            selected_r_rel = r_rel[observer_idx, toa_idx, geometry_time_idx]
-            selected_grid_u = toa_grid.stacked_grid_u[toa_idx]
-            r_rel_dot_grid_u = np.einsum('ik,ik->i', selected_r_rel, selected_grid_u)
-            cos_theta_v = r_rel_dot_grid_u / np.sqrt(
-                r_rel_norm_2[observer_idx, toa_idx, geometry_time_idx])
-            r_rel_proj = selected_r_rel - r_rel_dot_grid_u[:,None] * selected_grid_u
-
+        if use_sw:
+            sunlit = zeroed_cos_theta_s_hist[toa_idx, time_idx] != 0
+            # Restrict solar/azimuth calculations to sunlit visible cells.
+            observer_idx, toa_idx, time_idx = (idx[sunlit] for idx in (observer_idx, toa_idx, time_idx))
+            selected_grid_u = selected_grid_u[sunlit]
+            r_rel_proj = (selected_r_rel[sunlit]
+                          - r_rel_dot_grid_u[sunlit, None] * selected_grid_u)
+            viewing_zenith_angles = viewing_zenith_angles[sunlit]
+            del selected_r_rel, r_rel_dot_grid_u, sunlit
             cos_theta_s = zeroed_cos_theta_s_hist[toa_idx, time_idx]
             u_sun_proj = (toa_grid_u_sun_hist[toa_idx, time_idx]
-                          - cos_theta_s[:,None] * selected_grid_u)
+                          - cos_theta_s[:, None] * selected_grid_u)
             azimuth_denom = (get_norm_across_last_dim(r_rel_proj)
                              * get_norm_across_last_dim(u_sun_proj))
             # At exact solar/viewing zenith the azimuth is undefined; use 0 deg.
             cos_rel_az = np.ones_like(azimuth_denom)
             np.divide(np.einsum('ik,ik->i', r_rel_proj, u_sun_proj), azimuth_denom,
                       out=cos_rel_az, where=azimuth_denom > 0)
-            del selected_r_rel, selected_grid_u, r_rel_proj, u_sun_proj, azimuth_denom
-
-            # Scene data are shared across observers and remain (n_toa, nt).
-            scene_types = get_erbe_scene_types(jd_array, toa_grid, rad_config)
+            del selected_grid_u, r_rel_proj, u_sun_proj, azimuth_denom
             factors = ERBE_SW_ADM.factors(
                 solar_zenith_angles=np.rad2deg(np.arccos(np.clip(cos_theta_s, -1, 1))),
-                viewing_zenith_angles=np.rad2deg(np.arccos(np.clip(cos_theta_v, -1, 1))),
+                viewing_zenith_angles=viewing_zenith_angles,
                 relative_azimuth_angles=np.rad2deg(np.arccos(np.clip(cos_rel_az, -1, 1))),
-                scene_types=scene_types[toa_idx, time_idx],
-                method=rad_config.get('ADM_interp', 'nearest'),
-            )
+                scene_types=scene_types[toa_idx, time_idx], method=method)
             factors *= 1 / np.pi
             sw_map[observer_idx, toa_idx, time_idx] = factors
-            return sw_map                                                    # shape (np, np_toa, nt)
 
-        elif rad_type.lower()=="lw":
-            # TODO: implement LW ERBE ADMs
-            return (1/np.pi) * np.ones_like(r_rel_norm_2)
-
-    # OUTPUT:
-    # general form:     
+    if rad_type == "both":
+        return lw_map, sw_map
+    return lw_map if use_lw else sw_map
 
 
 def get_window_avg_maps(EEI_truth_name, jd_windows, map_name, grid: Grid):

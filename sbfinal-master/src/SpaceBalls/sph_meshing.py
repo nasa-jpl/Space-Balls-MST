@@ -107,7 +107,8 @@ class Grid(ABC):
         return np.nanmean(field_array, axis=len(np.shape(field_array))-1)
     
     def map_field_to_different_grid(self, field, new_grid: Grid, method='griddata_nearest'):
-        field_new_grid = sphere_field_interp(self.stacked_grid_latlon, field, new_grid.stacked_grid_latlon,
+        field_new_grid = sphere_field_interp(self.stacked_grid_latlon, self.vectorize_if_needed(field), 
+                                             new_grid.stacked_grid_latlon,
                                              method=method)
         return field_new_grid
         
@@ -228,10 +229,15 @@ class RegularLatLonGrid(Grid):
                 return field_array.reshape((self.n_lat*self.n_lon))
             elif shape[0]==self.n_lat*self.n_lon: # stretched time hist of field with time in axis 1
                 return field_array
-        
+
         elif len(shape)==3:
-            n_steps = shape[2] # assume last dim is the time dim - what about F maps?
+            if shape[1] * shape[2] == (self.n_lat * self.n_lon):
+                n_steps = shape[0] # first dim is time dim
+            elif shape[0] * shape[1] == (self.n_lat * self.n_lon):
+                n_steps = shape[2] # last dim is the time dim
+
             return field_array.reshape((self.n_lat*self.n_lon, n_steps)) # checked to give the same as for loop
+        
             #out_array = np.zeros((self.n_lat*self.n_lon, n_steps))
             #for i in range(n_steps):
             #    out_array[:,i] = field_array[:,:,i].reshape((self.n_lat*self.n_lon))

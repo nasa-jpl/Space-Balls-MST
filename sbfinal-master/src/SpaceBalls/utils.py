@@ -1038,3 +1038,21 @@ def notch_filter(t, y, f0, Q=30):
 
 def jd_to_mmddyyyy(jd):
     return Time(jd, format='jd').to_datetime().strftime("%Y-%m-%d")
+
+
+def get_jd_to_build_interp(n, out_jd_array, truth_full_jd_interval):
+
+    all_mid_day_jds = np.unique(np.round(out_jd_array))
+    #jd_array = mid_day_jd + np.arange(-n, n+1, 1)
+    jd_array = np.arange(np.min(all_mid_day_jds) - n, np.max(all_mid_day_jds) + n + 1, 1)
+    first_jd = truth_full_jd_interval[0] + 0.5
+    last_jd = truth_full_jd_interval[1] - 0.5
+    jd_array = np.delete(jd_array, jd_array<first_jd)
+    jd_array = np.delete(jd_array, jd_array>last_jd)
+
+    if first_jd in jd_array: 
+        jd_array = np.insert(jd_array, 0, truth_full_jd_interval[0])
+    if last_jd in jd_array:
+        jd_array = np.append(jd_array, truth_full_jd_interval[1] - 1e-5)    
+
+    return jd_array

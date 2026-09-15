@@ -76,8 +76,7 @@ def get_CS_mats(type_str, date_str, Nmax_file, Nmax_crop, mode="historic_SYN1deg
             Nmax_crop = 0
         
      # why does it work without the "shfiles." thing outside of tests??
-    module_name = 'config.earth.albedo_and_thermal.' + subfolder + type_str + 'Cosine_' + name_tail
-    module = importlib.import_module(module_name)
+    module_name = 'config.earth.albedo_and_thermal.' + lib.import_module(module_name)
     C_mat = getattr(module, type_str.lower() + 'CosineCof')
     C_mat = get_reduced_matrix(C_mat, Nmax_crop+1)
 
@@ -287,6 +286,19 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["earth_shape"] = "spherical"
         rad_config_dict["time_interp"] = "map_interp" # "sh_interp" # 
         rad_config_dict["ADM_model"] = "ERBE" # "sh_interp" # 
+
+    elif EEI_truth_name=="EEI_truth_42":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "SYN1deg_fine"
+        rad_config_dict["sh_normalization"] = "4pi"
+        rad_config_dict["Nmax"] = 179
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "spherical"
+        rad_config_dict["time_interp"] = "map_interp" # "sh_interp" # 
+        rad_config_dict["ADM_model"] = "ERBE" # "sh_interp" #
+        rad_config_dict["ADM_interp"] = "linear"
                 
         # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
         

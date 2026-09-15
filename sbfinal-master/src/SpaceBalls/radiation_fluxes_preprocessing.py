@@ -13,12 +13,14 @@ import SpaceBalls.radiation_settings as rad_settings
 from SpaceBalls.sph_meshing import Grid, RegularLatLonGrid, QuadratureGrid, expand_sh, field_hist_rotation_multiproc
 
 import config.constants as constants
-from SpaceBalls.utils import get_norm_across_last_dim, progress_bar, jd_to_mmddyyyy
+from SpaceBalls.utils import get_norm_across_last_dim, progress_bar, jd_to_mmddyyyy, get_jd_to_build_interp
 from SpaceBalls.plotter import Plotter
+from SpaceBalls.ADM_manager import load_erbe_sw_adm, get_erbe_scene_types
 
 AU = constants.astronomical_unit(units='km')
 RE = constants.earth_radius(units='km')
 STEP_MINUTES = 1 # DO NOT CHANGE - must be equal to the one used for the files in solar_ephemerides
+ERBE_SW_ADM = load_erbe_sw_adm(os.path.join(CONFIG_DIR, 'earth', 'ADMs', 'erbe_SW_ADM.dat'))
 
 REQUIRED_FILES = {
     "toa": ['daily_hist_LW_toa', 'daily_hist_SW_toa', 'daily_hist_net_toa', 'daily_hist_net_toa_SFF_accurate',
@@ -259,8 +261,8 @@ def compute_flux_hist_toa(jd_array, rad_config, grid: Grid, compute_net=True):
     d_sun_day = get_norm_across_last_dim(r_sun_hist) # np.sqrt(np.einsum('ij,ij->i', r_sun_day, r_sun_day)) # same as np.linalg.norm(r_sun_day,2,1) but slightly faster
     TSI_Earth_day_vec = TSI_1AU_jd_array * (AU/d_sun_day)**2
 
-    grid_r_sun_hist, grid_d_sun_hist = get_grid_r_sun_hist(r_sun_hist, grid.stacked_grid_r) #grid)
-    grid_u_sun_hist = get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist)
+    _, _, grid_u_sun_hist = get_grid_r_sun_hist(r_sun_hist, grid.stacked_grid_r) #grid)
+    # grid_u_sun_hist = get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist)
     zeroed_cos_theta_s_day_hist_toa = get_zeroed_cos_theta_s_hist(grid_u_sun_hist, grid)
 
     if not("time_interp" in rad_config):
@@ -411,24 +413,25 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
     for i, jd_array in enumerate(jd_chunks):
         print(f"Computing chunk {i+1}/{n_chunks}...")
         toa_LW_hist, toa_SW_hist, _ = compute_flux_hist_toa(jd_array, rad_config, toa_grid, compute_net=False)
-        #toa_LW_hist, toa_SW_hist = np.zeros((toa_grid.n_points, len(jd_array))), np.zeros((toa_grid.n_points, len(jd_array)))
+        # toa_LW_hist, toa_SW_hist = np.zeros((toa_grid.n_points, len(jd_array))), np.zeros((toa_grid.n_points, len(jd_array)))
 
-        print(f"Getting ADMs...")
         stacked_r_i = stacked_r if n_steps_r==1 else stacked_r_chunks[i]
-        LW_I_to_L_map = get_irradiance_to_radiance_map(stacked_r_i, jd_array, toa_grid, rad_config, 
-                                                    rad_type="LW", ADM_model=ADM_model) # shape (np, np_toa, n_steps)
-        SW_I_to_L_map = get_irradiance_to_radiance_map(stacked_r_i, jd_array, toa_grid, rad_config, 
-                                                        rad_type="SW", ADM_model=ADM_model) 
 
         print("Computing flux...")
             # 1. Compute all relative vectors
         r_rel = stacked_r_i[:,None,:,:] - toa_grid.stacked_grid_r[None,:,None,:] 
             # 2. Compute norm of relative vectors
-        r_rel_norm_4 = np.einsum('ijtk,ijtk->ijt', r_rel, r_rel)**2   # norm of all r_rel to the 4th power
+        r_rel_norm_2 = np.einsum('ijtk,ijtk->ijt', r_rel, r_rel)   # norm of all r_rel squared
             # 3. Compute all geometric kernels
-        geometric_kernel = np.einsum('ijtk,jk->ijt', r_rel, toa_grid.stacked_grid_u) / r_rel_norm_4 # this is cos(alpha)/(r_rel_norm**3)
+        geometric_kernel = np.einsum('ijtk,jk->ijt', r_rel, toa_grid.stacked_grid_u) / (r_rel_norm_2**2) # this is cos(alpha)/(r_rel_norm**3)
         np.maximum(geometric_kernel, 0, out=geometric_kernel) # set negative cosines(alpha) to zero
             # 4. Compute flux vector integral
+        print(f"Getting ADMs...")
+        LW_I_to_L_map = get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid, rad_config, 
+                                                    rad_type="LW", ADM_model=ADM_model) # shape (np, np_toa, n_steps)
+        SW_I_to_L_map = get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid, rad_config, 
+                                                        rad_type="SW", ADM_model=ADM_model) 
+
         if wavelength=="split":
             emission_F_LW_hist[i], emission_F_SW_hist[i] = (
                                  compute_earh_F_integral(toa_LW_hist, toa_SW_hist,
@@ -530,7 +533,7 @@ def compute_earh_F_integral(toa_LW_hist, toa_SW_hist, LW_I_to_L_map, SW_I_to_L_m
 def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid: Grid, toa_grid:Grid=None): # toa_grid input for penumbra (TODO)
     # TODO: so this function can be called with a satellite r_hist, change grid input for stacked_r? shapes TBD...
     # NOTE: the same code now works with TSI_1AU sized (n_steps,) instead of single float
-    grid_r_sun_hist, grid_d_sun_hist = get_grid_r_sun_hist(r_sun_day, stacked_r) #grid)
+    grid_r_sun_hist, grid_d_sun_hist, _ = get_grid_r_sun_hist(r_sun_day, stacked_r) #grid)
     TSI_grid_day_vec = TSI_1AU_day * (AU/grid_d_sun_hist)**2
     grid_u_sun_hist = get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist)
 
@@ -692,7 +695,7 @@ def get_r_sun_jd_hist(rad_config, jd_array):
     return r_sun_at_jd_array
 
 
-def get_grid_r_sun_hist(r_sun_day, stacked_r): 
+def get_grid_r_sun_hist(r_sun_day, stacked_r, compute_u=True): 
 
     # r_sun_day: time series of vectors from the CoM of Earth to the CoM of Sun
     # returns: time hist of unit vectors pointint TO the Sun from all grid points
@@ -715,8 +718,12 @@ def get_grid_r_sun_hist(r_sun_day, stacked_r):
 
     grid_d_sun_hist = get_norm_across_last_dim(grid_r_sun_hist) # np.sqrt(np.einsum('...j,...j->...', grid_r_sun_hist, grid_r_sun_hist))
     #grid_d_sun_hist = np.sqrt(np.einsum('ijk,ijk->ik',grid_r_sun_hist,grid_r_sun_hist)) # NOTE: equal to np.linalg.norm(grid_r_sun_hist, axis=1)
+    if compute_u:
+        grid_u_sun_hist = grid_r_sun_hist / (grid_d_sun_hist[...,None]) 
+    else:
+        grid_u_sun_hist = None
 
-    return grid_r_sun_hist, grid_d_sun_hist
+    return grid_r_sun_hist, grid_d_sun_hist, grid_u_sun_hist
 
 
 def get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist):
@@ -896,25 +903,13 @@ def get_smooth_daily_ae_hist(out_jd_array, rad_config, grid:Grid=None):
 
     # step 1: load few previous and next days
     n = 3 # number of days to load to built interpolator
-
-    all_mid_day_jds = np.unique(np.round(out_jd_array))
-    #jd_array = mid_day_jd + np.arange(-n, n+1, 1)
-    jd_array = np.arange(np.min(all_mid_day_jds) - n, np.max(all_mid_day_jds) + n + 1, 1)
-    first_jd = rad_config["jd_interval"][0] + 0.5
-    last_jd = rad_config["jd_interval"][1] - 0.5
-    jd_array = np.delete(jd_array, jd_array<first_jd)
-    jd_array = np.delete(jd_array, jd_array>last_jd)
-
-    if first_jd in jd_array: 
-        jd_array = np.insert(jd_array, 0, rad_config["jd_interval"][0])
-    if last_jd in jd_array:
-        jd_array = np.append(jd_array, rad_config["jd_interval"][1] - 1e-5)
+    jd_interp = get_jd_to_build_interp(n, out_jd_array, rad_config["jd_interval"])
 
     # step 2: load (and expand?) a&e maps
-    all_a = [None] * len(jd_array)
-    all_e = [None] * len(jd_array)
+    all_a = [None] * len(jd_interp)
+    all_e = [None] * len(jd_interp)
 
-    for i, jd in enumerate(jd_array):
+    for i, jd in enumerate(jd_interp):
         datestr = jd_to_mmddyyyy(jd)
         a, e = load_sh_maps(datestr, rad_config)
         if method=="map_interp":
@@ -926,8 +921,8 @@ def get_smooth_daily_ae_hist(out_jd_array, rad_config, grid:Grid=None):
         all_e[i] = e
 
     # step 3: make splines and interpolate
-    spline_a = make_interp_spline(jd_array, np.stack(all_a), k=3)
-    spline_e = make_interp_spline(jd_array, np.stack(all_e), k=3)
+    spline_a = make_interp_spline(jd_interp, np.stack(all_a), k=3)
+    spline_e = make_interp_spline(jd_interp, np.stack(all_e), k=3)
     # TODO: check what happens with first half of first day and last half of last day
 
     a_hist = spline_a(out_jd_array, extrapolate=False)
@@ -965,40 +960,86 @@ def irradiance_to_radiance(emission_hist, rad_type, r_alt=None, toa_grid_u_sun_h
     if ADM_model is None: # Lambertian emission model
         return (1/np.pi) * emission_hist
 
-def get_irradiance_to_radiance_map(stacked_r, jd_array, toa_grid: Grid, rad_config, rad_type, ADM_model=None):
+def get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid: Grid, rad_config: dict, 
+                                   rad_type: str, ADM_model=None):
 
     # INPUTS:
-    # stacked_r:    shape (np, n_steps_r, 3) - n_steps_r can be either 1 or n_steps
-    # jd_array:     shape (n_steps,)
+    # r_rel:        shape (np, np_toa, n_steps_r, 3) - n_steps_r can be either 1 or n_steps
+    # jd_array:     shape (n_steps,) NOTE about convention used: Jan 1st 2018 (00:00) is 2458119.5
     # toa_grid:     stacked_grid_r has shape (np_toa, 3)
-    n_steps_r = np.shape(stacked_r)[1]
+    n_steps_r = np.shape(r_rel)[2]
     n_steps = len(jd_array)
     assert((n_steps_r==1) or (n_steps_r==n_steps))
 
     if ADM_model is None:
-        I_to_L = (1/np.pi)
+        return (1/np.pi)
 
     else:
-        # # TODO: make sun stuff an external function to be called by the other methods that include duplication of this routine
-        # r_sun_hist = get_r_sun_jd_hist(rad_config, jd_array)
-        # grid_r_sun_hist, grid_d_sun_hist = get_grid_r_sun_hist(r_sun_hist, toa_grid.stacked_grid_r) #grid)
-        # grid_u_sun_hist = get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist)
-        # zeroed_cos_theta_s_day_hist = get_zeroed_cos_theta_s_hist(grid_u_sun_hist, toa_grid)
+        if rad_type.lower()=="sw":
+            # Sun stuff only for SW
+            # # TODO: make sun stuff an external function to be called by the other methods that include duplication of this routine
+            r_sun_hist = get_r_sun_jd_hist(rad_config, jd_array)
+            _, _, toa_grid_u_sun_hist = get_grid_r_sun_hist(r_sun_hist, toa_grid.stacked_grid_r) #grid)
+            zeroed_cos_theta_s_hist = get_zeroed_cos_theta_s_hist(toa_grid_u_sun_hist, toa_grid)
 
-        I_to_L = np.ones((len(stacked_r), toa_grid.n_points, n_steps)) * (1/np.pi)
+            lw_cell_filter = (geometric_kernel != 0)
+            sw_cell_filter = lw_cell_filter & (zeroed_cos_theta_s_hist[None,:,:] != 0)
 
+            # Keep the caller's dense output, but compute only the K visible,
+            # sunlit entries. Excluded cells contribute zero to the flux integral.
+            sw_map = np.zeros(sw_cell_filter.shape, dtype=float)
+            observer_idx, toa_idx, time_idx = np.nonzero(sw_cell_filter)
+            del lw_cell_filter, sw_cell_filter
+            if observer_idx.size == 0:
+                return sw_map
+
+            # Any number of observers is supported. For time-varying geometry,
+            # select each cell's time_idx; if the time axis has length 1, reuse
+            # time index 0 for each observer without tiling the geometry.
+            geometry_time_idx = 0 if n_steps_r == 1 else time_idx
+            selected_r_rel = r_rel[observer_idx, toa_idx, geometry_time_idx]
+            selected_grid_u = toa_grid.stacked_grid_u[toa_idx]
+            r_rel_dot_grid_u = np.einsum('ik,ik->i', selected_r_rel, selected_grid_u)
+            cos_theta_v = r_rel_dot_grid_u / np.sqrt(
+                r_rel_norm_2[observer_idx, toa_idx, geometry_time_idx])
+            r_rel_proj = selected_r_rel - r_rel_dot_grid_u[:,None] * selected_grid_u
+
+            cos_theta_s = zeroed_cos_theta_s_hist[toa_idx, time_idx]
+            u_sun_proj = (toa_grid_u_sun_hist[toa_idx, time_idx]
+                          - cos_theta_s[:,None] * selected_grid_u)
+            azimuth_denom = (get_norm_across_last_dim(r_rel_proj)
+                             * get_norm_across_last_dim(u_sun_proj))
+            # At exact solar/viewing zenith the azimuth is undefined; use 0 deg.
+            cos_rel_az = np.ones_like(azimuth_denom)
+            np.divide(np.einsum('ik,ik->i', r_rel_proj, u_sun_proj), azimuth_denom,
+                      out=cos_rel_az, where=azimuth_denom > 0)
+            del selected_r_rel, selected_grid_u, r_rel_proj, u_sun_proj, azimuth_denom
+
+            # Scene data are shared across observers and remain (n_toa, nt).
+            scene_types = get_erbe_scene_types(jd_array, toa_grid, rad_config)
+            factors = ERBE_SW_ADM.factors(
+                solar_zenith_angles=np.rad2deg(np.arccos(np.clip(cos_theta_s, -1, 1))),
+                viewing_zenith_angles=np.rad2deg(np.arccos(np.clip(cos_theta_v, -1, 1))),
+                relative_azimuth_angles=np.rad2deg(np.arccos(np.clip(cos_rel_az, -1, 1))),
+                scene_types=scene_types[toa_idx, time_idx],
+                method=rad_config.get('ADM_interp', 'nearest'),
+            )
+            factors *= 1 / np.pi
+            sw_map[observer_idx, toa_idx, time_idx] = factors
+            return sw_map                                                    # shape (np, np_toa, nt)
+
+        elif rad_type.lower()=="lw":
+            # TODO: implement LW ERBE ADMs
+            return (1/np.pi) * np.ones_like(r_rel_norm_2)
 
     # OUTPUT:
-    # general form:     shape (np, np_toa, n_steps)
-    # if no ADM:        just a float? check whether it makes the later einsum break...
-
-    return I_to_L
+    # general form:     
 
 
-# to be revised:
 def get_window_avg_maps(EEI_truth_name, jd_windows, map_name, grid: Grid):
 
-    truth_jd_arrays = get_EEI_truth_daily_jd_arrays(EEI_truth_name)
+    rad_config = rad_settings.radiation_settings_from_EEI_truth_name(EEI_truth_name)
+    truth_jd_arrays = get_EEI_truth_daily_jd_arrays(rad_config["jd_interval"])
     base_data_dir = os.path.join(MEDIA_DIR, 'true_EEI', EEI_truth_name)
     avg_map_array = [None] * len(jd_windows)
 

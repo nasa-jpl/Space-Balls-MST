@@ -6,14 +6,14 @@ import SpaceBalls.input_database_manager as input_db_manager
 from SpaceBalls.paths import MEDIA_DIR, OUTPUT_DIR
 from multiprocessing import Pool
 
-n_days = 2
+n_days = 1
 
 def run_sb(sb_hash):
     print(f"Running SpaceBalls simulation for input hash: {sb_hash}")
-    simulator = SpaceBallsSim(input_name=sb_hash, input_mode='hash')
+    simulator = SpaceBallsSim(input_name=sb_hash, input_mode='hash', verbose=True)
     simulator.run_daily_loop(day_to_stop=n_days)
 
-n_facets_vec = [6, 24, 48, 72, 96, 120, 180, 280, 450]
+n_facets_vec = [96] # [6, 24, 48, 72, 96, 120, 180] #, 280, 450]
 keys = []
 
 for i, n_facets in enumerate(n_facets_vec):
@@ -21,17 +21,24 @@ for i, n_facets in enumerate(n_facets_vec):
         'force_settings': 2,
         'integration_settings': 0,
         'delta_t_out': 15,
+        'orbit_name': 'A1',
         'sc_name': 'SC_0_'+str(n_facets),
     }
     key_arr = input_db_manager.get_primary_keys(desired_sb)
-    for key in key_arr:
-        if not(os.path.exists(os.path.join(OUTPUT_DIR, key, 'day_0', 'erp.npy'))):
-            keys += [key]
+    keys += key_arr
+
+    #for key in key_arr:
+    #    if not(os.path.exists(os.path.join(OUTPUT_DIR, key, 'day_0', 'erp.npy'))):
+    #        keys += [key]
 
 #run_sb('GRACE-FO_spherical')
-run_sb('SB_R800_35_101')
+#run_sb('SB_R800_35_101')
 
 #keys = input_db_manager.get_primary_keys(desired_sb)
+for i, key in enumerate(keys):
+    print(f"Running {n_facets_vec[i]} faces...")
+    run_sb(key)
+
 #keys = [key for key in keys if 'LAGEOS' not in key]
 #keys = ['LAGEOS_' + str(100+i) for i in range(20)]
 

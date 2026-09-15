@@ -2,6 +2,11 @@ Steps to run basic_daily_loop.py:
 
 1. clone the repository
 
+2. Run the following commands:
+conda activate monte168
+cd <cloned-repo>/sbfinal-master
+python -m pip install --no-deps -e .
+
 2. Move all the albedo_and_thermal folder (sent separately) to config/earth/
 
 3. Open the src/SpaceBalls/paths file and set the desired OUTPUT_DIR. MEDIA_DIR is only for pre/postproc results (unrelated to basic_daily_loop.py)

@@ -10,7 +10,8 @@ import Monte as M
 import mpy.units as units
 
 import numpy as np
-import importlib
+import json
+
 from scipy.io import savemat
 from scipy.special import lpmn
 from astropy.time import Time as Time_astropy
@@ -36,32 +37,23 @@ class SpaceBallsSim():
             self.config_info = input_manager.get_dicts(input_name)
             print(self.config_info)
         elif input_mode=="file":
-            self.userfile = load_input_file(input_name)
+            with open(os.path.join(INPUT_DIR, input_name+'.json'), 'r') as json_file:
+                self.config_info = json.load(json_file)
+            #self.userfile = load_input_file(input_name)
             #TODO: self.config_info = old_usefile_to_config_info(self.userfile) # convert the old userfiles to the new format
 
         self.input_name = input_name
         self.verbose = verbose
 
-        #if self.userfile.INTEGRATION_SETTINGS['n_rings_albedo']=='default':
-        #    self.n_rings_albedo = None
-        #else:
-        #    self.n_rings_albedo = self.userfile.INTEGRATION_SETTINGS['n_rings_albedo']
+        self.n_rings_albedo = self.config_info['integration_settings']['n_rings']
         
-        #self.n_rings_albedo = self.config_info['integration_settings']['n_rings']
-        self.n_rings_albedo = 6 # TODO: change back!
-        
-        #self.wgs84_albedo = self.userfile.FORCE_SETTINGS['WGS84_alb edo_shape']
-        #self.out_dir_csv = './output_files/' + self.input_name + '/data_output/'
-        #self.out_dir_png = './output_files/' + self.input_name + '/img_output/'
-        
-        self.out_dir_csv = os.path.join(OUTPUT_DIR, self.input_name) # + '/data_output/'
-        #self.out_dir_png = '/media/monte_share/output_files/' + self.input_name + '/img_output/'
-        
-        if os.path.exists(self.out_dir_csv): # TODO: not robust if the directories exist but they are empty!
+        self.out_dir_data = os.path.join(OUTPUT_DIR, self.input_name) # + '/data_output/'
+
+        if os.path.exists(self.out_dir_data): # TODO: not robust if the directories exist but they are empty!
             #sc_boa = self.input_name + '_' + self.spacecraft.name + '_out.boa'
             #previous_sc_boa = M.BoaLoad(sc_boa)
             # retrieve number of existing propagated days
-            self.existing_days = len(next(os.walk(self.out_dir_csv))[1]) - 2
+            self.existing_days = len(next(os.walk(self.out_dir_data))[1]) - 2
             #assert(self.existing_days>0)
             #if self.existing_days<0:
             
@@ -75,7 +67,7 @@ class SpaceBallsSim():
         
         self._set_boa()
 
-        Shape._set_earth_shape(self.boa, self.EEI_truth_settings["earth_shape"]) # we're here
+        Shape._set_earth_shape(self.boa, self.EEI_truth_settings["earth_shape"]) 
         if self.verbose: print("Earth shape set")
 
         self._set_time_handler()
@@ -98,7 +90,7 @@ class SpaceBallsSim():
         # previously in OutputManager:
         self.coord = M.CoordSetBoa.read( self.boa )
 
-        self.GravModel = get_Earth_SH_gravity_model("GOCO06s")
+        self.GravModel = get_Earth_SH_gravity_model(self.config_info['force_settings']['earth_grav_field'])
 
     def run_propagation_arc(self, t0: Time, duration_hours):
         
@@ -194,12 +186,12 @@ class SpaceBallsSim():
     
     def _create_spacecraft_set(self):
         
-        #n = self.userfile.SC_INPUT['N_sc']
+
         n = 1 # several sc at once does not seem to be more efficient (file sbsim2) - use parallel proc. instead
         self.sc_array = [None]*n
 
         for i in range(n):
-            name = self.input_name  #self.userfile.SC_INPUT['name'] + '_' + str(i)
+            name = self.input_name 
             sc_i = Spacecraft(self.boa, name, self.th.start_epoch, self.config_info['sc_params'], self.config_info['orbit'], self.existing_days)
             self.sc_array[i] = sc_i
 
@@ -265,18 +257,12 @@ class SpaceBallsSim():
 
     def write_output(self, daily_out_subdir, th: TimeHandler):
         
-        data_out_dir = os.path.join(self.out_dir_csv, daily_out_subdir) 
-        ##img_out_dir = self.out_dir_png + daily_out_subdir
-        
+        data_out_dir = os.path.join(self.out_dir_data, daily_out_subdir) 
+
         os.makedirs(data_out_dir, exist_ok=True) 
-        #os.makedirs(img_out_dir, exist_ok=True)
-        
-        #self.matlab_output = self.userfile.OUTPUT_SETTINGS['matlab_output']
-        
+
         # self.out_frame = Frames.set_NadirFrame(self.boa, self.daily_th, self.spacecraft.name) #TODO: frame flexibility
         # out frame seems useless
-
-        # rotating frame stuff TBD here
 
         if self.verbose: print("Generating Accel data files ... ")
         output_manager = OutputManager(self, th)
@@ -296,9 +282,6 @@ class SpaceBallsSim():
             print(f"Time to compute {self.force_manager.force_names[i]}: {t2-t1}")
                         
             file_name = self.force_manager.force_names[i]
-            
-            # output_manager.write_acc_csv(acc_hist, data_out_dir, file_name)
-
             output_manager.write_acc(acc_hist, data_out_dir, file_name)
 
             self.all_acc_hist[i] = acc_hist
@@ -306,14 +289,6 @@ class SpaceBallsSim():
 
         self.all_acc_hist = np.stack(self.all_acc_hist, axis=2)  # size: [nsteps, 3, nforces]
 
-        # longs, lats, heights = output_manager.find_lonlat_hist()
-
-        #np.savetxt(self.out_dir_csv + 'visibility_caps.csv', output_manager.all_visibility_cap_lonlats, 
-        #           header='Lat (deg), Lon (deg), height (km)') # TODO: organize more consistently
-
-        # file_name = 'lat_lon_h.csv'
-        # output_manager.write_latlonheight_csv(lats, longs, heights, data_out_dir, file_name)
-        
         output_manager.find_r_hist()
 
         file_name = 'xyz_ecef'
@@ -327,12 +302,6 @@ class SpaceBallsSim():
         
         all_rot_mat = output_manager.get_all_ECEF2RIC_rotations()
         np.save(os.path.join(data_out_dir, 'ecef2ric_hist'), np.array(all_rot_mat))
-
-
-        # file_name = 'r_sun_ecef.csv'
-        # output_manager.save_r_sun_hist('IAU Earth Fixed', data_out_dir, file_name)
-        
-        #self.groundtrack_hist = [longs, lats, heights]
 
         """
         if 'visibility_cap_hist' in self.matlab_output:
@@ -472,7 +441,7 @@ class Shape():
     
         #Enter Shape Data for Earth (used for finding Long and Lat )
 
-        R_Earth = constants.earth_radius(monte_units=True)   # TODO: WGS84 is hard-coded
+        R_Earth = constants.earth_radius(monte_units=True)   # NOTE: WGS84 equatorial radius is hard-coded
         #f_Earth = constants.earth_flattening()
         if shape_tag == "spherical":
             f_Earth = 0
@@ -508,7 +477,7 @@ class OutputManager():
 
         self.jd_array = [pointtime.julianDate('UTC') for pointtime in self.pointtimes]
 
-        os.makedirs(sim_instance.out_dir_csv, exist_ok=True)   # TODO: daily subdirs data/png should probably be removed
+        os.makedirs(sim_instance.out_dir_data, exist_ok=True)   # TODO: daily subdirs data/png should probably be removed
         #os.makedirs(sim_instance.out_dir_png, exist_ok=True)
     
 
@@ -747,7 +716,7 @@ class ForceManager():
         self.forces.append(M.GravityForce)
         grav = M.Gravity(self.boa, scname)
 
-        Nmax = 12 #self.settings_dict['Nmax_grav']
+        Nmax = self.settings_dict['Nmax_grav']
         
         # EarthHarmonics = M.SphHarmonics(self.boa, "Earth", M.CoordName.IauEarthFixed, self.GravModel.meanr,  # TODO: is this output useless?? (the line is not)
         #                                 self.GravModel.jCof[:(Nmax+1)], Nmax, self.GravModel.cCof, self.GravModel.sCof, self.GravModel.normalized)
@@ -993,7 +962,7 @@ class Spacecraft():
         if existing_days==0:
             self.kep_0 = sc_kep0_dict # sim_instance.userfile.SC_KEP_0
         else: # TODO: use previous boa file properly
-            last_day_dir = sim_instance.out_dir_csv + 'day_' + str(sim_instance.existing_days) 
+            last_day_dir = sim_instance.out_dir_data + 'day_' + str(sim_instance.existing_days) 
             try:
                 cart_r_hist = np.loadtxt(last_day_dir + '/xyz_ecef.csv')  # [km]
             except:
@@ -1016,7 +985,7 @@ class Spacecraft():
                 # first order derivaitve seems to increase eccentricity too much (factor 10); try central difference
                 # self.cart_v_0 = (cart_r_hist[1,:] - cart_r_hist[0,:]) / ((jd_vec[1]-jd_vec[0]) * 86400.0)  # [km/s]
                 
-                last_day_dir_prev = sim_instance.out_dir_csv + 'day_' + str(sim_instance.existing_days - 1)
+                last_day_dir_prev = sim_instance.out_dir_data + 'day_' + str(sim_instance.existing_days - 1)
                 jd_vec_prev = np.loadtxt(last_day_dir_prev + '/jd_vec.csv') 
                 cart_r_hist_prev = np.loadtxt(last_day_dir_prev + '/xyz_ecef.csv')  # [km]
                 # cart_r0_prev = cart_r_hist_prev[-1,:]

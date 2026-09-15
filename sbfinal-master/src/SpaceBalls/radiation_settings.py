@@ -76,7 +76,8 @@ def get_CS_mats(type_str, date_str, Nmax_file, Nmax_crop, mode="historic_SYN1deg
             Nmax_crop = 0
         
      # why does it work without the "shfiles." thing outside of tests??
-    module_name = 'config.earth.albedo_and_thermal.' + lib.import_module(module_name)
+    module_name = 'config.earth.albedo_and_thermal.' + subfolder + type_str + 'Cosine_' + name_tail
+    module = importlib.import_module(module_name)
     C_mat = getattr(module, type_str.lower() + 'CosineCof')
     C_mat = get_reduced_matrix(C_mat, Nmax_crop+1)
 

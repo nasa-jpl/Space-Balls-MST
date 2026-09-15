@@ -1,0 +1,32 @@
+{
+    "orbit": {
+        "a_0": 7178.137,
+        "e_0": 0,
+        "i_0": 90,
+        "RAAN_0": 0,
+        "w_0": 0,
+        "theta_0": 0,
+        "delta_jd_0": 0
+    },
+    "sc_params": {
+        "mass": 90,
+        "area": 0.7854,
+        "shape": "sphere6", 
+        "CD": 2.2,
+        "diffReflect": 0,
+        "diffDegrade": 1,
+        "specReflect": 0,
+        "specDegrade": 1
+    },
+    "force_settings": {
+        "earth_grav_field": "GOCO2025s",
+        "Nmax_grav": 12,
+        "third_bodies": "Sun|Moon",
+        "EEI_truth": 1,
+        "smooth_shadow": 1
+    },
+    "integration_settings": {
+        "n_rings": 5
+    },
+    "delta_t_out": 15
+}

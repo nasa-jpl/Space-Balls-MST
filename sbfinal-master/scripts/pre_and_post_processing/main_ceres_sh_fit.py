@@ -12,7 +12,8 @@ out_dir = os.path.join(CONFIG_DIR, 'earth', 'albedo_and_thermal', 'SYN1deg_l179'
 os.makedirs(out_dir, exist_ok=True)
 
 #ebaf_fname = 'CERES_EBAF-TOA_Ed4.2.1_Subset_201801-202512.nc'
-syn1deg_fname_1 = 'CERES_SYN1deg-Day_Terra-Aqua-NOAA20_Ed4.2_Subset_20180101-20220105.nc'
+#syn1deg_fname_1 = 'CERES_SYN1deg-Day_Terra-Aqua-NOAA20_Ed4.2_Subset_20180101-20220105.nc'
+syn1deg_fname_1 = 'CERES_SYN1deg-Day_Terra-Aqua-NOAA20_Ed4.2_Subset_20220106-20251231.nc'
 
 #ebaf_dataset = xr.open_dataset(os.path.join(base_dir, ebaf_fname))
 

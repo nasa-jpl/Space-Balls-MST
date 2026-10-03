@@ -5,7 +5,8 @@ from __future__ import annotations
 import sys, os, importlib
 import numpy as np
 import time
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, KDTree
+from scipy.spatial.transform import Rotation
 from scipy.interpolate import griddata, Rbf, RBFInterpolator, RectSphereBivariateSpline, SmoothSphereBivariateSpline, LSQSphereBivariateSpline
 
 from astropy.coordinates import get_body, ITRS, SkyCoord, CartesianRepresentation
@@ -16,9 +17,8 @@ from abc import ABC, abstractmethod
 
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR
 from SpaceBalls.utils import get_two_perp_unit_vectors, progress_bar, get_pairwise_midpoints, get_norm_across_last_dim
-#from SpaceBalls.plotter import Plotter
-sys.path.insert(0, str(CONFIG_DIR.parent)) 
-import config.constants as constants
+#sys.path.insert(0, str(CONFIG_DIR.parent)) 
+import SpaceBalls.constants as constants
 RE = constants.earth_radius()
 
 class Grid(ABC):
@@ -40,6 +40,12 @@ class Grid(ABC):
         self.n_points = None
         self.r_projected_to_ellipsoid = False
         # Additional common attributes can be added here if needed
+
+    def is_TOA(self):
+        if self.alt_km <= 20:
+            return True
+        else:
+            return False
 
     def compute_total_area(self):
         if self.flattening==0:
@@ -111,7 +117,40 @@ class Grid(ABC):
                                              new_grid.stacked_grid_latlon,
                                              method=method)
         return field_new_grid
+
+    def avg_field_to_coarser_grid(self, field_array, new_grid: Grid):
+        """Average a (fine nodes, times) field onto the nearest coarse nodes.
+
+        Each fine node contributes exactly once, using Euclidean distance in
+        stacked_grid_r. Equal-distance ties select one nearest coarse node.
+        Values are weighted by self.integration_weights and normalized by
+        the sum of assigned weights. Coarse nodes with zero total weight
+        (including nodes with no assigned fine nodes) receive NaN.
+        """
+        assert(0 < new_grid.n_points < self.n_points)
+        field_array = np.asarray(field_array)
+        if field_array.ndim != 2 or field_array.shape[0] != self.n_points:
+            raise ValueError("field_array must have shape (self.n_points, n_times)")
+
+        weights = np.asarray(self.integration_weights)
+        if weights.shape != (self.n_points,):
+            raise ValueError("integration_weights must have shape (self.n_points,)")
+
+        new_grid_tree = KDTree(new_grid.stacked_grid_r)
+        _, coarse_indices = new_grid_tree.query(self.stacked_grid_r, k=1)
+
+        weight_sums = np.bincount(coarse_indices, weights=weights,
+                                  minlength=new_grid.n_points)
+        new_grid_data = np.zeros((new_grid.n_points, field_array.shape[1]))
+        np.add.at(new_grid_data, coarse_indices, field_array * weights[:, None])
+        np.divide(new_grid_data, weight_sums[:, None], out=new_grid_data,
+                  where=weight_sums[:, None] != 0)
+        new_grid_data[weight_sums == 0, :] = np.nan
+
+        return new_grid_data
+
         
+
 
     @abstractmethod
     def initialize_grid(self):
@@ -261,15 +300,15 @@ class QuadratureGrid(Grid):
     """
     Subclass for quadrature grids using Lebedev rules.
     """
-    def __init__(self, alt_km, order:int, flattening=0, default_womersley=False):
+    def __init__(self, alt_km, order:int, flattening=0, default_womersley=False, add_random_rotation=False):
         super().__init__(alt_km, flattening)
         self.grid_name = 'grid_quad_n'+str(order)
         self.grid_type_name = 'quadrature'
         self.order = order
         self.default_womersley = default_womersley
-        self.initialize_grid()
+        self.initialize_grid(add_random_rotation)
 
-    def initialize_grid(self):
+    def initialize_grid(self, add_random_rotation):
 
         #if self.flattening == 0:
         if (self.order <= 131) and not(self.default_womersley): 
@@ -285,7 +324,10 @@ class QuadratureGrid(Grid):
             weights = np.ones(self.n_points) * (4 * np.pi) / self.n_points
             #raise NotImplementedError("Orders > 131 not implemented")
         
-        self.stacked_grid_u = np.transpose(u_el)
+        if add_random_rotation:
+            u_el = Rotation.random().apply(u_el.T).T
+
+        self.stacked_grid_u = u_el.T
         self.stacked_grid_r = self.stacked_grid_u * (RE + self.alt_km)
         
         (_, all_lat, all_lon) = cartesian_to_spherical(u_el[0, :], u_el[1, :], u_el[2, :])
@@ -307,6 +349,51 @@ class QuadratureGrid(Grid):
     def vectorize_if_needed(self, field_array):
         return field_array
     
+    def compute_lat_avg_map(self, field_aray):
+        raise NotImplementedError("Lat avg. not implemented (yet?) for non-regular grids")
+
+
+class AntipodalGrid(Grid):
+    """
+    Two antipodal nodes, each representing half of the total surface area.
+
+    Nodes are ordered north, south by default. Set add_random_rotation=True
+    to rotate the pair while preserving their antipodal placement.
+    """
+    def __init__(self, alt_km, flattening=0, add_random_rotation=False):
+        super().__init__(alt_km, flattening)
+        self.grid_name = 'grid_bihemispheric'
+        self.grid_type_name = 'bihemispheric'
+        self.initialize_grid(add_random_rotation)
+
+    def initialize_grid(self, add_random_rotation=False):
+        self.n_points = 2
+        self.stacked_grid_u = np.array([[0., 0., 1.], [0., 0., -1.]])
+        if add_random_rotation:
+            self.stacked_grid_u = Rotation.random().apply(self.stacked_grid_u)
+
+        self.stacked_grid_r = self.stacked_grid_u * (RE + self.alt_km)
+        _, all_lat, all_lon = cartesian_to_spherical(
+            self.stacked_grid_u[:, 0], self.stacked_grid_u[:, 1],
+            self.stacked_grid_u[:, 2])
+        self.stacked_grid_latlon = np.column_stack((all_lat.deg, all_lon.deg))
+
+        if self.flattening != 0:
+            self.project_r_vectors_to_elliposoid()
+            self.adjust_u_vectors_to_ellipsoid()
+
+        # Each node represents a whole hemisphere, including on an ellipsoid.
+        self.integration_weights = np.full(self.n_points, self.total_area / 2)
+
+    def recompute_grid(self, r_sat):
+        pass
+
+    def reshape_if_needed(self, field_array):
+        return field_array
+
+    def vectorize_if_needed(self, field_array):
+        return field_array
+
     def compute_lat_avg_map(self, field_aray):
         raise NotImplementedError("Lat avg. not implemented (yet?) for non-regular grids")
 
@@ -403,11 +490,11 @@ def get_pysh_grid(quad_type, lmax): # separate function to avoid the import conf
     pysh_grid = pysh.SHGrid.from_zeros(lmax=lmax, grid=quad_type)
     return pysh_grid
 
-def fit_sh_field(y_vec, lon_vec, lat_vec, lmax):
+def fit_sh_field(y_vec, lon_vec, lat_vec, lmax, weight_vec=None):
     import pyshtools as pysh 
     
     sh_set = pysh.SHCoeffs.from_least_squares(data=y_vec, latitude=lat_vec, longitude=lon_vec, 
-                                              lmax=lmax)
+                                              lmax=lmax, weights=weight_vec)
     
     return sh_set
 

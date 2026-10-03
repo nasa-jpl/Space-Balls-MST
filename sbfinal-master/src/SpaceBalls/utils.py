@@ -3,6 +3,7 @@ import importlib, importlib.util
 import time
 import numpy as np
 import scipy.signal, scipy.interpolate, scipy.fft
+from scipy.spatial.transform import Rotation
 import json
 import hashlib
 from astropy.time import Time
@@ -1056,3 +1057,17 @@ def get_jd_to_build_interp(n, out_jd_array, truth_full_jd_interval):
         jd_array = np.append(jd_array, truth_full_jd_interval[1] - 1e-5)    
 
     return jd_array
+
+
+
+def get_Rotation(rot_axis, theta_hist):
+    
+    q4 = np.cos(theta_hist/2)
+    if len(np.shape(rot_axis))==1: # constant axis
+        q1, q2, q3 = rot_axis[:,None] * np.sin(theta_hist/2)[None,:]
+
+    elif len(np.shape(rot_axis))==2: # time history, shape 3 x n_steps
+        q1, q2, q3 = rot_axis * np.sin(theta_hist/2)[None,:]
+
+    return Rotation.from_quat(np.stack((q1, q2, q3, q4), axis=1), scalar_first=False)
+    

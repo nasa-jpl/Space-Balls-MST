@@ -2,8 +2,8 @@ import sqlite3
 import sys, os
 from SpaceBalls.utils import load_input_file, make_dict_hash_key
 from SpaceBalls.paths import INPUT_DIR, CONFIG_DIR
-sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
-import config.constants as constants
+#sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
+import SpaceBalls.constants as constants
 Re = constants.earth_radius()
 
 conn = sqlite3.connect(os.path.join(INPUT_DIR,'inputs_database.db'))

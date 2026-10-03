@@ -5,20 +5,22 @@ import astropy.units as u
 import multiprocessing
 from multiprocessing import Pool
 from scipy.interpolate import make_interp_spline
+from scipy.spatial.transform import Rotation
 import time
 
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR
-sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
+#sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
 import SpaceBalls.radiation_settings as rad_settings
 from SpaceBalls.sph_meshing import Grid, RegularLatLonGrid, QuadratureGrid, expand_sh, field_hist_rotation_multiproc
 
-import config.constants as constants
+import SpaceBalls.constants as constants
 from SpaceBalls.utils import get_norm_across_last_dim, progress_bar, jd_to_mmddyyyy, get_jd_to_build_interp
 from SpaceBalls.plotter import Plotter
 from SpaceBalls.ADM_manager import load_erbe_sw_adm, get_erbe_scene_types, load_erbe_lw_adm
 
 AU = constants.astronomical_unit(units='km')
 RE = constants.earth_radius(units='km')
+LIGHT_SPEED = constants.light_speed()
 STEP_MINUTES = 1 # DO NOT CHANGE - must be equal to the one used for the files in solar_ephemerides
 ERBE_SW_ADM = load_erbe_sw_adm(os.path.join(CONFIG_DIR, 'earth', 'ADMs', 'erbe_SW_ADM.dat'))
 ERBE_LW_ADM = load_erbe_lw_adm(os.path.join(CONFIG_DIR, 'earth', 'ADMs', 'erbe_LW_ADM.dat'))
@@ -27,9 +29,8 @@ REQUIRED_FILES = {
     "toa": ['daily_hist_LW_toa', 'daily_hist_SW_toa', 'daily_hist_net_toa', 'daily_hist_net_toa_SFF_accurate',
             'daily_avg_net_toa', 'daily_hist_net_toa_surf_avg', # 'daily_hist_net_toa_lat_avg'
             ],
-    "altitude": ['daily_hist_net_F_{alt_km}km', 'daily_hist_net_F_{alt_km}km_SFF_accurate',
+    "altitude": ['daily_hist_net_F_{alt_km}km', 'daily_hist_net_F_{alt_km}km_SFF_accurate', 'daily_avg_net_Fr_{alt_km}km_SFF_accurate',
                  'daily_avg_net_F_{alt_km}km', 'daily_avg_net_F_{alt_km}km_SFF_accurate',
-                 'daily_avg_net_Fr_{alt_km}km', 'daily_avg_net_Fr_{alt_km}km_SFF_accurate',
                  'daily_surf_avg_net_{alt_km}km']
 
     # "altitude": ['daily_hist_net_Fr_{alt_km}km', 'daily_hist_net_Fr_{alt_km}km_SFF',
@@ -43,19 +44,17 @@ REQUIRED_FILES = {
 
 def get_required_files(grid: Grid):
 
-    key = 'toa' if grid.alt_km==0 else 'altitude'
+    key = 'toa' if grid.is_TOA() else 'altitude'
     files = REQUIRED_FILES[key].copy()
 
     if grid.alt_km>0:
         files = [f.replace('{alt_km}', str(grid.alt_km)) for f in files]
     
-    if grid.n_points>5810 and key=="altitude": # lebedev order 131 grid has 5810 points
-        files = [f for f in files if "hist" not in f] # would be too much storage
 
     return files
 
 
-def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, n_cores=4):
+def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, compute_SFF=True):
 
     base_data_dir = os.path.join(MEDIA_DIR, 'true_EEI', EEI_truth_name)
     
@@ -64,13 +63,17 @@ def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, 
     mid_day_jd_array = mid_day_jd_array_from_jd_interval(rad_config["jd_interval"])
     n_days = len(mid_day_jd_array)
 
-    if (grid.alt_km==0) or (selected_days_idxs is None) or (len(selected_days_idxs)==0):
+    if  (selected_days_idxs is None) or (len(selected_days_idxs)==0): # (grid.alt_km==0) or
         compute_all_days = True
         idxs_days_to_loop = range(n_days)
+        rm_daily_hists = True if grid.n_points>3000 else False # 5810
+            
     else:
         compute_all_days = False
         daily_jd_arrays = [daily_jd_arrays[i] for i in selected_days_idxs]
         idxs_days_to_loop = selected_days_idxs
+        rm_daily_hists = False
+    print(f"Compute all days: {compute_all_days}")
 
     for day_idx, jd_array in zip(idxs_days_to_loop, daily_jd_arrays):
 
@@ -80,14 +83,16 @@ def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, 
         #TSI_1AU_day = rad_settings.get_TSI_1AU(mid_day_jd, rad_config["TSI_source"])
         R_ECEF_to_SunFrame_day_hist = get_R_SunFrame_hist(rad_config["ephemerides"], mid_day_jd)
 
-        file_names, file_existences = get_file_names_and_existence(base_data_dir, day_idx, grid)
+        rm_SFF = False if compute_SFF else True
+        file_names, file_existences = get_file_names_and_existence(base_data_dir, day_idx, grid,
+                                                                   rm_daily_hists, rm_SFF)
         #if not(file_existences[f"daily_hist_net_toa_SFF_accurate"]) and (day_idx in selected_days_idxs):
         #    compute_SFF = True # At TOA, the only reason we want the SFF map is for animations
         #else:
         #    compute_SFF = False
-        net_toa_day_hist_SFF = None
+        net_toa_day_hist_SFF = None # TODO: TOA SFF
 
-        if grid.alt_km==0 and not(all(file_existences.values())):
+        if grid.is_TOA() and not(all(file_existences.values())):
             toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist = get_daily_hist_toa(base_data_dir, 
                                                                                     day_idx, 
                                                                                     mid_day_jd, 
@@ -95,13 +100,22 @@ def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, 
                                                                                     rad_config, 
                                                                                     grid)
             save_toa_files(toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist, net_toa_day_hist_SFF,
-                   base_data_dir, day_idx, grid)
+                   file_names, file_existences, grid)
 
         elif grid.alt_km>0 and not(all(file_existences.values())):
             
-            daily_hist_net_F_altitude, daily_hist_net_Fr_altitude = get_daily_hist_net_at_altitude(
-                                    base_data_dir, day_idx, mid_day_jd, jd_array, rad_config, grid, 
-                                    n_cores)
+            daily_hist_net_F_altitude = get_daily_hist_net_at_altitude(
+                                    base_data_dir, day_idx, mid_day_jd, jd_array, rad_config, grid)
+            
+            if compute_SFF and not(file_existences[f"daily_hist_net_F_{grid.alt_km}km_SFF_accurate"]):
+                daily_hist_net_F_altitude_SFF = get_daily_hist_net_at_altitude(
+                                                    base_data_dir, day_idx, mid_day_jd, jd_array, rad_config, grid,
+                                                    sff=True)
+            else:
+                daily_hist_net_F_altitude_SFF = None
+
+            save_altitude_files(daily_hist_net_F_altitude, daily_hist_net_F_altitude_SFF,
+                                file_names, file_existences, grid)
 
 
 def get_daily_hist_toa(base_data_dir, day_idx, mid_day_jd, day_jd_array, rad_config, grid: Grid, load_emission=True, load_net=True):
@@ -163,16 +177,16 @@ def get_hist_toa_new(EEI_truth_name, jd_array, grid: Grid, load_emission=True, l
 
 
 
-def get_daily_hist_net_at_altitude(base_data_dir, day_idx, mid_day_jd, day_jd_array, rad_config, grid: Grid, n_cores):
+def get_daily_hist_net_at_altitude(base_data_dir, day_idx, mid_day_jd, day_jd_array, 
+                                   rad_config: dict, grid: Grid, sff:bool=False):
     
     all_file_names, file_existences = get_file_names_and_existence(base_data_dir, day_idx, grid)
-    sff = True
     
     if file_existences.get('daily_hist_net_F_'+str(grid.alt_km)+'km', False):
         pass
         # load daily_hist_net_F_altitude and compute the rest (this option should not really ever happen if the preproc scripts have been run correctly)
     else:
-        toa_grid = QuadratureGrid(alt_km=0, order=131) # integration to altitude MUST be done with the Lebedev TOA grid (orders of magnitude more accurate with less points)
+        toa_grid = get_toa_grid_from_rad_config(rad_config, quadrature_order=201)
 
         if sff:
             R_ECEF_to_SunFrame_day_hist = get_R_SunFrame_hist(rad_config["ephemerides"], mid_day_jd)
@@ -181,34 +195,33 @@ def get_daily_hist_net_at_altitude(base_data_dir, day_idx, mid_day_jd, day_jd_ar
         else:
             stacked_r = grid.stacked_grid_r[:,None,:]
 
-        daily_hist_earth_F_altitude = compute_earth_F_at_altitude(day_jd_array, rad_config, stacked_r, toa_grid)
-        if sff:
-            daily_hist_earth_F_altitude = apply_SFF_rotation(R_ECEF_to_SunFrame_day_hist, daily_hist_earth_F_altitude, "ECEF_to_SFF")
-        daily_hist_earth_Fr_altitude = F_vec_to_Fr(daily_hist_earth_F_altitude, grid.stacked_grid_u) # grid is already defined in SFF
-
-
-        Plotter.plot_geo_data_new(daily_hist_earth_Fr_altitude[:,0], grid, 
-                                  file_name='earth_Fr_ECEF_0', add_coastlines=False, make_symmetric_cmap=False)
-        Plotter.plot_geo_data_new(daily_hist_earth_Fr_altitude[:,700], grid, 
-                                  file_name='earth_Fr_ECEF_700', add_coastlines=False, make_symmetric_cmap=False)
-
-        a-3
-
-
         r_sun_day = get_r_sun_day_hist(rad_config["ephemerides"], mid_day_jd)
+        TSI_1AU_day = rad_settings.get_TSI_1AU(day_jd_array, rad_config['TSI_source'])
         daily_hist_solar_F_altitude = get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, 
-                                                                     stacked_r, grid, toa_grid)
+                                                                  stacked_r, grid, toa_grid,
+                                                                  penumbra_method=rad_config.get('penumbra_method'))
         if sff:
             daily_hist_solar_F_altitude = apply_SFF_rotation(R_ECEF_to_SunFrame_day_hist, daily_hist_solar_F_altitude, "ECEF_to_SFF")
-        daily_hist_solar_Fr_altitude = F_vec_to_Fr(daily_hist_solar_F_altitude, grid.stacked_grid_u)
+        # daily_hist_solar_Fr_altitude = F_vec_to_Fr(daily_hist_solar_F_altitude, grid.stacked_grid_u)
+        # Plotter.plot_geo_data_new(daily_hist_solar_Fr_altitude[:,0], grid, 
+        #                           file_name='sun_Fr_ECEF_0', add_coastlines=True, make_symmetric_cmap=True)
+        # Plotter.plot_geo_data_new(daily_hist_solar_Fr_altitude[:,700], grid, 
+        #                           file_name='sun_Fr_ECEF_700', add_coastlines=True, make_symmetric_cmap=True)
 
-        Plotter.plot_geo_data_new(daily_hist_solar_Fr_altitude[:,0], grid, 
-                                  file_name='sun_Fr_SFF_0', add_coastlines=False, make_symmetric_cmap=True)
-        Plotter.plot_geo_data_new(daily_hist_solar_Fr_altitude[:,700], grid, 
-                                  file_name='sun_Fr_SFF_700', add_coastlines=False, make_symmetric_cmap=True)
+        
+        daily_hist_earth_F_altitude = compute_earth_F_at_altitude(day_jd_array, rad_config, stacked_r, toa_grid)
+
+        if sff:
+            daily_hist_earth_F_altitude = apply_SFF_rotation(R_ECEF_to_SunFrame_day_hist, daily_hist_earth_F_altitude, "ECEF_to_SFF")
+        # daily_hist_earth_Fr_altitude = F_vec_to_Fr(daily_hist_earth_F_altitude, grid.stacked_grid_u) # grid is already defined in SFF
+        # Plotter.plot_geo_data_new(daily_hist_earth_Fr_altitude[:,700], grid, 
+        #                           file_name='earth_Fr_ECEF_700', add_coastlines=True, make_symmetric_cmap=False)
 
 
-    return daily_hist_net_F_altitude #, daily_hist_net_Fr_altitude
+        daily_hist_net_F_altitude = daily_hist_solar_F_altitude + daily_hist_earth_F_altitude
+
+
+    return daily_hist_net_F_altitude
 
 
 # deprecated function
@@ -262,8 +275,7 @@ def compute_flux_hist_toa(jd_array, rad_config, grid: Grid, compute_net=True):
     d_sun_day = get_norm_across_last_dim(r_sun_hist) # np.sqrt(np.einsum('ij,ij->i', r_sun_day, r_sun_day)) # same as np.linalg.norm(r_sun_day,2,1) but slightly faster
     TSI_Earth_day_vec = TSI_1AU_jd_array * (AU/d_sun_day)**2
 
-    _, _, grid_u_sun_hist = get_grid_r_sun_hist(r_sun_hist, grid.stacked_grid_r) #grid)
-    # grid_u_sun_hist = get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist)
+    _, _, grid_u_sun_hist = get_grid_r_sun_hist(r_sun_hist, grid.stacked_grid_r) 
     zeroed_cos_theta_s_day_hist_toa = get_zeroed_cos_theta_s_hist(grid_u_sun_hist, grid)
 
     if not("time_interp" in rad_config):
@@ -395,12 +407,13 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
     assert((wavelength=="sum") or (wavelength=="split") or (wavelength=="LW") or (wavelength=="SW"))
 
     ADM_model = rad_config.get('ADM_model')
-    if ADM_model is None: nt = n_steps_r # nt is the most constraining one to build the arrays after this
-    else: nt = n_steps
+    if ADM_model is None: nt = n_steps_r 
+    else: nt = n_steps  # nt is the most constraining one to build the arrays after this
 
-    max_ram_GB = 12
+    max_ram_GB = 8
     max_nt = 8e9 * max_ram_GB / (64 * toa_grid.n_points * n_p * 3)
     n_chunks = np.max([1, int(np.floor(nt / max_nt))])
+    if n_chunks>n_steps: n_chunks = n_steps # temporary patch if memory resists
     print(f"Splitting day into {n_chunks} chunks")
     jd_chunks = np.array_split(jd_array, n_chunks)
     stacked_r_chunks = np.array_split(stacked_r, n_chunks, axis=1)
@@ -414,7 +427,8 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
     for i, jd_array in enumerate(jd_chunks):
         print(f"Computing chunk {i+1}/{n_chunks}...")
         toa_LW_hist, toa_SW_hist, _ = compute_flux_hist_toa(jd_array, rad_config, toa_grid, compute_net=False)
-        # toa_LW_hist, toa_SW_hist = np.zeros((toa_grid.n_points, len(jd_array))), np.zeros((toa_grid.n_points, len(jd_array)))
+        #toa_LW_hist, toa_SW_hist = np.zeros((toa_grid.n_points, len(jd_array))), np.zeros((toa_grid.n_points, len(jd_array)))
+        #toa_LW_hist, toa_SW_hist = np.random.rand(toa_grid.n_points, len(jd_array)), np.random.rand(toa_grid.n_points, len(jd_array))
 
         stacked_r_i = stacked_r if n_steps_r==1 else stacked_r_chunks[i]
 
@@ -428,15 +442,12 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
         np.maximum(geometric_kernel, 0, out=geometric_kernel) # set negative cosines(alpha) to zero
             # 4. Compute flux vector integral
         print(f"Getting ADMs...")
-        # LW_I_to_L_map = get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid, rad_config, 
-        #                                             rad_type="LW", ADM_model=ADM_model) # shape (np, np_toa, n_steps)
-        # SW_I_to_L_map = get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_array, toa_grid, rad_config, 
-        #                                                 rad_type="SW", ADM_model=ADM_model) 
         LW_I_to_L_map, SW_I_to_L_map = get_irradiance_to_radiance_map(
             r_rel, r_rel_norm_2, geometric_kernel, jd_array,
             toa_grid, rad_config, ADM_model=ADM_model, rad_type="both"
         )
-
+        del r_rel_norm_2
+        print(f"Computing integral with einsum...")
         if wavelength=="split":
             emission_F_LW_hist[i], emission_F_SW_hist[i] = (
                                  compute_earh_F_integral(toa_LW_hist, toa_SW_hist,
@@ -454,12 +465,13 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
                                                         ADM_model=ADM_model)
 
     if wavelength=="split":
-        emission_F_LW_hist = np.vstack(emission_F_LW_hist)
-        emission_F_SW_hist = np.vstack(emission_F_SW_hist)
+        time_axis = 2 if store_dF else 1
+        emission_F_LW_hist = np.concatenate(emission_F_LW_hist, axis=time_axis) # np.vstack(emission_F_LW_hist)
+        emission_F_SW_hist = np.concatenate(emission_F_SW_hist, axis=time_axis) # np.vstack(emission_F_SW_hist)
         return emission_F_LW_hist, emission_F_SW_hist
 
     else:
-        emission_F_hist = np.vstack(emission_F_hist)
+        emission_F_hist = np.concatenate(emission_F_hist, axis=1) # np.vstack(emission_F_hist) # we're here - vstack does not work if len of time axis is 1??
         return emission_F_hist
 
 
@@ -535,14 +547,18 @@ def compute_earh_F_integral(toa_LW_hist, toa_SW_hist, LW_I_to_L_map, SW_I_to_L_m
             return F_hist_LW
 
 
-def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid: Grid, toa_grid:Grid=None): # toa_grid input for penumbra (TODO)
+def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid:Grid=None, 
+                                toa_grid:Grid=None, penumbra_method=None, grid_bool=True): # toa_grid input for penumbra (TODO)
     # TODO: so this function can be called with a satellite r_hist, change grid input for stacked_r? shapes TBD...
     # NOTE: the same code now works with TSI_1AU sized (n_steps,) instead of single float
-    grid_r_sun_hist, grid_d_sun_hist, _ = get_grid_r_sun_hist(r_sun_day, stacked_r) #grid)
+    # Here a 2-D input is always a static grid, even if n_points == n_steps.
+    stacked_r = np.asarray(stacked_r)
+    if stacked_r.ndim == 2:
+        stacked_r = stacked_r[:, None, :]
+    _, grid_d_sun_hist, grid_u_sun_hist = get_grid_r_sun_hist(r_sun_day, stacked_r)
     TSI_grid_day_vec = TSI_1AU_day * (AU/grid_d_sun_hist)**2
-    grid_u_sun_hist = get_grid_u_sun_hist(grid_r_sun_hist, grid_d_sun_hist)
 
-    if grid.alt_km<=20: # TODO: what if we define TOA at 20 or other low altitudes? Make robust...
+    if grid_bool and grid.is_TOA(): # TOA // TODO: is this robust to different TOA altitudes? Shouldn't be larger than 20...
         # # Old version:
         zeroed_cos_theta_s_day_hist = get_zeroed_cos_theta_s_hist(grid_u_sun_hist, grid, earth_f=0)#toa_grid.flattening)
         grid_u_sun_hist_filtered = grid_u_sun_hist * (zeroed_cos_theta_s_day_hist[...,None]!=0)  # filter out eclipse
@@ -550,33 +566,8 @@ def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid: Grid, t
     else:
         # # instead: filter out eclipse for a general Earth shape and accounting for penumbra (Adhya et al 2003) 
         # #          so the function zeroed_cos_theta_s_day_hist is no longer needed, and grid input can then be removed
-
-        # New version (Adhya et al 2003) # TODO: there are major issues with the paper but for now this seems good enough
-        R_SUN = 695700
-        if len(np.shape(stacked_r))==3: # np.shape(stacked_r)=(n_points,n_steps,3)
-            #ri = np.cross(r_sun_day, stacked_r) # np.shape(r_sun_day)=(n_steps,3); 
-            pass
-        elif len(np.shape(stacked_r))==2: # np.shape(stacked_r)=(n_points,3)
-            #stacked_r = stacked_r[:,None,:] # make a repmat instead until we fix the whole method
-            stacked_r = np.repeat(stacked_r[:,None,:], len(r_sun_day), 1)
-
-        ri = np.cross(r_sun_day, stacked_r)
-        sp = np.cross(r_sun_day, ri)
-        sp = sp / (get_norm_across_last_dim(sp)[...,None])
-        rs1 = r_sun_day[None,:,:] + sp * R_SUN
-        rs2 = r_sun_day[None,:,:] - sp * R_SUN
-        b1, b2 = stacked_r - rs1, stacked_r - rs2
-        b1_norm, b2_norm = get_norm_across_last_dim(b1), get_norm_across_last_dim(b2)
-        det_1, dp1, dn1 = compute_adhya_intersection(stacked_r, b1, RE, RE*(1 - toa_grid.flattening))
-        det_2, dp2, dn2 = compute_adhya_intersection(stacked_r, b2, RE, RE*(1 - toa_grid.flattening))
-        assert(np.array_equal(np.isnan(det_1), np.isnan(det_2))) # should never happen
-
-        shadow_f = np.ones_like(det_1)
-        shadow_f[(det_1>=0) * (det_2<0) * (dp1 < b1_norm) * (dn1 < b1_norm)] = 0.5 # penumbra TODO: more rigorous 0-1 scale
-        shadow_f[(det_1<0) * (det_2>=0) * (dp2 < b2_norm) * (dn2 < b2_norm)] = 0.5 # penumbra TODO: more rigorous 0-1 scale
-        shadow_f[(det_1>0) * (det_2>0) * (dp1 < b1_norm) * (dp2 < b2_norm) * (dn1 < b1_norm) * (dn2 < b2_norm)] = 0 # umbra
-        shadow_f[np.isnan(det_1) * (dp1 < b1_norm) * (dp2 < b2_norm) * (dn1 < b1_norm) * (dn2 < b2_norm)] = 0 # also umbra
-
+        shadow_f = compute_shadow_f(stacked_r, r_sun_day, toa_grid, 
+                                    penumbra_method=penumbra_method)
         grid_u_sun_hist_filtered = grid_u_sun_hist * shadow_f[...,None]  
 
     solar_F_day_hist = -grid_u_sun_hist_filtered * TSI_grid_day_vec[...,None]  # # minus sign so that vecors are pointing AWAY from Sun; einsum proven to take the same
@@ -584,75 +575,386 @@ def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid: Grid, t
     return solar_F_day_hist 
 
 
+def compute_shadow_f(stacked_r, r_sun_day, toa_grid: Grid,
+                     *, penumbra_method="0.5"):
+    """Return illumination factors with shape (n_points, n_steps).
+
+    Positions are geocentric, in km, in a common frame with Earth's polar
+    axis along z (normally ECEF). ``stacked_r`` is (n_points, 3) or
+    (n_points, n_steps, 3); a singleton time axis is also accepted. The Sun
+    history is (n_steps, 3). The occulting ellipsoid has equatorial radius
+    RE + toa_grid.alt_km and polar radius scaled by 1 - flattening.
+
+    ``smooth_shadow=False`` uses a point Sun and returns 0 or 1. True uses
+    two apparent solar limb rays in the Earth-observer-Sun plane, following
+    the Adhya approach, and returns 0, 0.5, or 1. Despite its historical
+    name, this switch does not produce a continuous penumbra transition.
+    Two rays approximate an oblate Earth's full apparent silhouette; they
+    are not an exact solar-disc/ellipse overlap calculation.
+
+    Surface observers looking outward are illuminated; inward rays are
+    occulted. A tangent contact away from the observer counts as occulted.
+    Interior observers are occulted. Partial and annular eclipses both use
+    the penumbra method (currently only "constant", giving 0.5).
+    """
+    smooth_shadow = False if penumbra_method is None else True
+
+    if (penumbra_method is not None) and (penumbra_method != "0.5"):
+        raise ValueError("Only penumbra_method='0.5' is implemented.")
+    observers = np.asarray(stacked_r, dtype=float)
+    sun = np.asarray(r_sun_day, dtype=float)
+    if observers.ndim not in (2, 3) or observers.shape[-1] != 3:
+        raise ValueError("stacked_r must have shape (n_points, 3) or (n_points, n_steps, 3).")
+    if sun.ndim != 2 or sun.shape[-1] != 3:
+        raise ValueError("r_sun_day must have shape (n_steps, 3).")
+    if observers.ndim == 2:
+        observers = observers[:, None, :]
+    if observers.shape[1] not in (1, len(sun)):
+        raise ValueError("The observer time axis must have length 1 or n_steps.")
+    if not np.all(np.isfinite(observers)) or not np.all(np.isfinite(sun)):
+        raise ValueError("Observer and Sun positions must be finite.")
+    p = RE + toa_grid.alt_km
+    flattening = toa_grid.flattening
+    if not np.isfinite(p) or p <= 0 or not np.isfinite(flattening) or not 0 <= flattening < 1:
+        raise ValueError("The occulting radius must be positive and 0 <= flattening < 1.")
+    q = p * (1 - flattening)
+    axes = np.array([p, p, q])
+    if np.any(np.sum((sun / axes)**2, axis=-1) <= 1):
+        raise ValueError("The Sun centre must be outside the occulting ellipsoid.")
+
+    # Broadcasting avoids copying a static grid for every time step.
+    observers, sun = np.broadcast_arrays(observers, sun[None, :, :])
+    to_sun = sun - observers
+    distance = get_norm_across_last_dim(to_sun)
+    solar_radius = 695700.0 if smooth_shadow else 0.0
+    if np.any(distance <= solar_radius):
+        raise ValueError("Observers must be outside the Sun (and distinct from its centre).")
+    if not smooth_shadow:
+        return (~_shadow_segment_is_blocked(observers, to_sun, p, q)).astype(float)
+
+    u = to_sun / distance[..., None]
+    # Direction toward Earth's apparent centre, perpendicular to the Sun
+    # sightline. Cross products avoid subtracting nearly parallel vectors.
+    transverse = np.cross(u, np.cross(-observers, u))
+    transverse_norm = get_norm_across_last_dim(transverse)
+    earth_distance = get_norm_across_last_dim(observers)
+    cos_alpha = np.sqrt(1 - (solar_radius / distance)**2)
+    # A small apparent Earth can lie entirely within the solar disc while
+    # both limb rays AND the Sun-centre ray miss it (off-axis antumbra).
+    earth_centre_in_disc = ((transverse_norm <= earth_distance * solar_radius / distance)
+                            & (np.einsum('...i,...i->...', observers, u) < 0)
+                            & (earth_distance < distance * cos_alpha))
+    aligned = transverse_norm <= 32 * np.finfo(float).eps * np.maximum(earth_distance, p)
+    if np.any(aligned):
+        # The plane is undefined on the shadow axis. Use the projected
+        # polar direction (the smaller silhouette radius of an oblate
+        # Earth); for a polar sightline any equatorial direction suffices.
+        aligned_u = u[aligned]
+        fallback = np.cross(aligned_u, np.cross([0., 0., 1.], aligned_u))
+        fallback_norm = np.linalg.norm(fallback, axis=-1)
+        polar = fallback_norm <= 32 * np.finfo(float).eps
+        fallback[polar] = np.cross(aligned_u[polar], np.cross([1., 0., 0.], aligned_u[polar]))
+        transverse[aligned] = fallback
+        transverse_norm[aligned] = np.linalg.norm(fallback, axis=-1)
+    transverse /= transverse_norm[..., None]
+
+    # Exact tangent points on a spherical Sun, measured from the observer:
+    # d*cos(alpha)^2*u +/- R_sun*cos(alpha)*transverse, sin(alpha)=R_sun/d.
+    limb_centre = to_sun * cos_alpha[..., None]**2
+    limb_offset = transverse * (solar_radius * cos_alpha)[..., None]
+    near_blocked = _shadow_segment_is_blocked(observers, limb_centre + limb_offset, p, q)
+    far_blocked = _shadow_segment_is_blocked(observers, limb_centre - limb_offset, p, q)
+    umbra = near_blocked & far_blocked
+    partial = (near_blocked | far_blocked | earth_centre_in_disc) & ~umbra
+    shadow_f = np.ones(distance.shape)
+    shadow_f[umbra] = 0.0
+    if np.any(partial):
+        shadow_f[partial] = _compute_penumbra_f(
+            observers[partial], sun[partial], p, q, method=penumbra_method)
+    return shadow_f
+
+
+def _compute_penumbra_f(observers, sun, p, q, *, method):
+    """Extension point for partial-eclipse flux, evaluated only in penumbra.
+
+    Future methods can use these geometries for circular-disc overlap,
+    a locally straight Earth limb, or solar-disc quadrature against the
+    ellipsoid. Keep the eclipse classification independent of that choice.
+    """
+    if method == "0.5":
+        return np.full(observers.shape[:-1], 0.5)
+    raise ValueError(f"Unknown penumbra method: {method!r}")
+
+
+def _shadow_segment_is_blocked(a, b, p, q):
+    """Whether the segment a + t*b, 0 < t < 1, meets the ellipsoid.
+
+    Test the closest point in ellipsoid-scaled coordinates. This avoids
+    solving a quadratic for every ray and explicitly excludes intersections
+    behind the observer or beyond the Sun. Zero-length rays are rejected by
+    compute_shadow_f before this helper is called.
+    """
+    axes = np.array([p, p, q])
+    origin, direction = a / axes, b / axes
+    length_squared = np.einsum('...i,...i->...', direction, direction)
+    t_closest = -np.einsum('...i,...i->...', origin, direction) / length_squared
+    closest = origin + np.clip(t_closest, 0, 1)[..., None] * direction
+    closest_squared = np.einsum('...i,...i->...', closest, closest)
+    tolerance = 32 * np.finfo(float).eps
+    blocked = (closest_squared < 1 - tolerance) | (
+        (t_closest > 0) & (t_closest < 1) & (closest_squared <= 1 + tolerance))
+    # A surface tangent may acquire a tiny positive t from roundoff.
+    # Exclude that contact at the observer without excluding a distant
+    # tangent, or any ray starting strictly inside the ellipsoid.
+    origin_squared = np.einsum('...i,...i->...', origin, origin)
+    surface_tangent = ((np.abs(origin_squared - 1) <= tolerance)
+                       & (t_closest**2 * length_squared <= tolerance**2))
+    return blocked & ~surface_tangent
+
+
 def compute_adhya_intersection(a, b, p, q):
+    """Intersect a + t*b with x²/p² + y²/p² + z²/q² = 1.
 
-    a1, a2, a3 = a[...,0], a[...,1], a[...,2]
-    b1, b2, b3 = b[...,0], b[...,1], b[...,2]
+    Return (det, t_enter, t_exit), with ordered, signed line parameters.
+    These replace the old unsigned distances from the solar limb: callers
+    must now check the relevant parameter interval, e.g. 0 < t < 1 for a
+    ray from a to a+b. Misses have negative det and NaN roots. Tangencies
+    have det=0 and equal roots. A zero direction is invalid.
 
-    #A = b1**2 * q**2 + b2**2 * q**2 + b3**2 * p**2
-    #B = -2 * b2**2 * q**2 * a1 + 2 * b1 * q**2 * a2 - 2 * p**2 * b3**2 * a1 + 2 * p**2 * b1 * a3
-    #C = q**2 * (b1**2 * a2**2 - b2**2 * a1**2 - 2 * b2 * b1 * a1 * a2) + p**2 * (b1**2 * a3**2 - b3**2 * a1**2 - 2 * b3 * b1 * a1 * a3) - b1**2 * p**2 * q**2
-    
-    # codex:
-    A = b1**2*q**2 + b2**2*q**2 + b3**2*p**2
-
-    B = (
-        -2*b2**2*q**2*a1
-        + 2*b1*b2*q**2*a2
-        - 2*b3**2*p**2*a1
-        + 2*b1*b3*p**2*a3
-    )
-
-    C = (
-        q**2 * (b1*a2 - b2*a1)**2
-        + p**2 * (b1*a3 - b3*a1)**2
-        - b1**2*p**2*q**2
-    )
-    
-    det = B**2 - 4*A*C
-    intersec_idxs = (det>=0)
-
-    xp, xn = np.zeros_like(det), np.zeros_like(det) # coordinates of the positive/negative solutions from the intersection eq.
-    xp[intersec_idxs] = (-B[intersec_idxs] + np.sqrt(det[intersec_idxs])) / (2*A[intersec_idxs])
-    xn[intersec_idxs] = (-B[intersec_idxs] - np.sqrt(det[intersec_idxs])) / (2*A[intersec_idxs])
-
-    d_intersec_p = compute_intersec_d(xp, a, b, intersec_idxs)
-    d_intersec_n = compute_intersec_d(xn, a, b, intersec_idxs)
-    
-    return det, d_intersec_p, d_intersec_n
-
-
-def compute_intersec_d(x, a, b, idxs):
-
-    a1, a2, a3 = a[...,0], a[...,1], a[...,2]
-    b1, b2, b3 = b[...,0], b[...,1], b[...,2]
-
-    y, z = np.zeros_like(x), np.zeros_like(x) # coordinates of the positive solution from the intersection eq.
-    y[idxs] = a2[idxs] + b2[idxs]/b1[idxs] * (x[idxs] - a1[idxs])
-    z[idxs] = a3[idxs] + b3[idxs]/b1[idxs] * (x[idxs] - a1[idxs])
-
-    r_intersec = np.stack([x, y, z], axis=-1) # wrt Earth center
-    r_intersec = r_intersec + b - a           # wrt to Sun tangence point
-
-    return get_norm_across_last_dim(r_intersec)
+    In scaled coordinates A=b.b, B=2*a.b, C=a.a-1. The discriminant
+    returned is (B²-4*A*C)/(4*A), evaluated as 1-|a cross unit(b)|² to
+    avoid subtracting large, nearly equal quadratic terms near tangency.
+    """
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    if a.ndim == 0 or b.ndim == 0 or a.shape[-1] != 3 or b.shape[-1] != 3:
+        raise ValueError("a and b must have a final dimension of length 3.")
+    if not np.isfinite(p) or not np.isfinite(q) or p <= 0 or q <= 0:
+        raise ValueError("Ellipsoid semiaxes must be finite and positive.")
+    if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
+        raise ValueError("a and b must be finite.")
+    axes = np.array([p, p, q])
+    origin, direction = np.broadcast_arrays(a / axes, b / axes)
+    length = np.linalg.norm(direction, axis=-1)
+    if np.any(length == 0):
+        raise ValueError("The line direction must be nonzero.")
+    unit = direction / length[..., None]
+    half_B = np.sum(origin * unit, axis=-1)
+    cross = np.cross(origin, unit)
+    impact_squared = np.sum(cross * cross, axis=-1)
+    det = 1 - impact_squared
+    tolerance = 32 * np.finfo(float).eps * np.maximum(1, impact_squared)
+    det = np.where(np.abs(det) <= tolerance, 0., det)
+    sqrt_det = np.sqrt(np.maximum(det, 0))
+    # Stable quadratic formula; recover the other root from their product.
+    root = -half_B - np.copysign(sqrt_det, half_B)
+    C = np.sum(origin * origin, axis=-1) - 1
+    other = np.divide(C, root, out=np.zeros_like(root), where=root != 0)
+    other = np.where(det == 0, root, other)
+    t_enter = np.where(det >= 0, np.minimum(root, other) / length, np.nan)
+    t_exit = np.where(det >= 0, np.maximum(root, other) / length, np.nan)
+    return det, t_enter, t_exit
 
 
+def compute_F_hist_at_sat_r_hist(EEI_truth_name, sat_r_hist, sat_jd_hist, toa_grid: Grid,
+                                 erp_wl_split=True, store_dF=False):
 
-def compute_F_hist_at_sat_r_hist(EEI_truth_name, sat_r_hist, sat_jd_hist, toa_grid: Grid):
-
-    base_data_dir = os.path.join(MEDIA_DIR, 'true_EEI', EEI_truth_name)
     rad_config = rad_settings.radiation_settings_from_EEI_truth_name(EEI_truth_name)
 
-    erp_F_LW_hist, erp_F_SW_hist = compute_earth_F_at_altitude(sat_jd_hist, rad_config, 
-                                             sat_r_hist[None,...], toa_grid,
-                                             store_dF=False, wavelength="split")
-    print(np.shape(erp_F_LW_hist))
-    #erp_F_LW_hist = np.sum(erp_F_LW_hist, axis=1)
-    #erp_F_SW_hist = np.sum(erp_F_SW_hist, axis=1)
+    r_sun_hist = get_r_sun_jd_hist(rad_config, sat_jd_hist)
+    TSI_1AU_day = rad_settings.get_TSI_1AU(sat_jd_hist, rad_config['TSI_source'])
+    srp_F_hist = get_solar_incoming_day_hist(r_sun_hist, TSI_1AU_day, 
+                                             sat_r_hist[None,...], grid_bool=False,
+                                             toa_grid=toa_grid,
+                                             penumbra_method=rad_config.get('penumbra_method'))
+    if erp_wl_split:
+        erp_F_LW_hist, erp_F_SW_hist = compute_earth_F_at_altitude(sat_jd_hist, rad_config, 
+                                                sat_r_hist[None,...], toa_grid,
+                                                store_dF=store_dF, wavelength="split")
 
-    print("done")
+        return erp_F_LW_hist, erp_F_SW_hist, srp_F_hist
+    
+    else:
+        erp_F_hist = compute_earth_F_at_altitude(sat_jd_hist, rad_config, 
+                                                sat_r_hist[None,...], toa_grid,
+                                                store_dF=store_dF, wavelength="sum")
 
-    return erp_F_LW_hist, erp_F_SW_hist 
+        return erp_F_hist, srp_F_hist
+
+    # TODO: accelerations for plated satellites, which are not just a constant times F
+
+
+def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hist, sat_jd_hist, toa_grid: Grid,
+                                 sat_R_body2ECEF_hist):
+
+    # this function computes accelerations on a plated satellite due to ERP and SRP. 
+    # first step is to call compute_F_hist_at_sat_r_hist to get the beam of fluxes (Earth element fluxes from all Earth surface nodes)
+
+    n_steps = len(sat_r_hist)
+    assert(len(sat_jd_hist) == len(sat_R_body2ECEF_hist) == n_steps)
+    # sat_R_body2ECEF_hist = Rotation.random(n_steps).as_matrix()
+
+    # all nets below still to be scaled by 1/(mc) to get acc. in ms-2
+
+    # if different SW vs LW coefficients:
+    if sat_dict['coeff_wl_split']:
+        erp_dF_LW_hist, erp_dF_SW_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
+                                                            sat_r_hist, 
+                                                            sat_jd_hist, 
+                                                            toa_grid,
+                                                            store_dF=True)
+        # erp_dF_LW_hist is shaped (1, np_toa, nt, 3)
+        # erp_dF_SW_hist is shaped (1, np_toa, nt, 3)
+        # srp_dF_hist is shaped (1, nt, 3)
+
+        # all nets below still to be scaled by 1/(mc) to get acc. in ms-2
+        net_erp_LW = _integrate_net_vec_codex(erp_dF_LW_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
+                                            sat_dict["plate_ca_LW"], sat_dict["plate_cd_LW"], sat_dict["plate_cs_LW"], 
+                                            sat_R_body2ECEF_hist)
+        
+        net_erp_SW = _integrate_net_vec_codex(erp_dF_SW_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
+                                            sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
+                                            sat_R_body2ECEF_hist)
+        net_erp = net_erp_LW + net_erp_SW
+
+    else: # if same LW+SW coeffs:
+        erp_dF_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
+                                                           sat_r_hist, 
+                                                           sat_jd_hist, 
+                                                           toa_grid,
+                                                           store_dF=True,
+                                                           erp_wl_split=False)
+        net_erp = _integrate_net_vec_codex(erp_dF_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
+                                    sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
+                                    sat_R_body2ECEF_hist)
+
+    net_srp = _integrate_net_vec_codex(srp_F_hist[:,None,:,:], sat_dict["plate_normals"], sat_dict["plate_areas"], 
+                                       sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
+                                       sat_R_body2ECEF_hist)
+
+    factor = 1 / (sat_dict['mass'] * LIGHT_SPEED)
+    a_erp, a_srp = factor * net_erp, factor * net_srp
+
+    return a_erp, a_srp
+
+
+def _integrate_net_vec(dF_beam_hist, sat_plate_normals, sat_plate_areas, sat_plate_ca, sat_plate_cd, sat_plate_cs, sat_R_body2ECEF_hist):
+    
+    # the following computation does a the double surface integral (TOA surface + sat surface) at every time step without for loops, but is still 100x slower than what codex achieved from it
+
+    sat_plate_normal_hist = np.einsum('tik,pk->pti', sat_R_body2ECEF_hist, sat_plate_normals)
+    # checked to be the same as
+    # sat_plate_normal_hist = np.zeros((n_plates, n_steps, 3))
+    # for i, R_body2ECEF in enumerate(sat_R_body2ECEF_hist):
+    #     sat_plate_normal_hist[:,i,:] = (R_body2ECEF @ sat_plate_normals.T).T
+
+    norm_dF_beam_hist = get_norm_across_last_dim(dF_beam_hist)[...,None]
+    u_dF_beam_hist = np.divide(
+        dF_beam_hist,
+        norm_dF_beam_hist,
+        out=np.zeros_like(dF_beam_hist, dtype=float),
+        where=norm_dF_beam_hist != 0,
+    )
+    cos = np.einsum('jitk,ntk->jint', -u_dF_beam_hist, sat_plate_normal_hist, optimize='optimal') # (1, np_toa, n_faces, nt)
+    np.maximum(0, cos, out=cos) # this probably filters out 30-50% of previous non-zero elements
+
+    s_term = np.einsum('p,jitk->jiptk', sat_plate_ca + sat_plate_cd, u_dF_beam_hist, optimize='optimal')
+    n_term_interior = 2/3*sat_plate_cd[None,None,:,None] + 2*cos*sat_plate_cs[None,None,:,None]
+    n_term = np.einsum('jipt,ptk->jiptk', n_term_interior, sat_plate_normal_hist, optimize='optimal')
+    cR_tensor = s_term - n_term
+
+    net_vec = np.einsum('jitk,p,jipt,jiptk->jtk', norm_dF_beam_hist, sat_plate_areas, cos, cR_tensor, optimize='optimal') # seems faster with no optimize
+    #vec = area * cos * ((ca_i+cd_i) * s - (2/3*cd_i + 2*cos*cs_i) * n)
+
+    return net_vec
+
+import numpy as np
+
+
+def _integrate_net_vec_codex(
+    dF_beam_hist,
+    sat_plate_normals,
+    sat_plate_areas,
+    sat_plate_ca,
+    sat_plate_cd,
+    sat_plate_cs,
+    sat_R_body2ECEF_hist,
+):
+    """Return c * force in ECEF, shaped (n_observers, n_times, 3).
+
+    Inputs:
+      dF_beam_hist: (n_observers, n_sources, n_times, 3), in W/m^2.
+      sat_plate_normals: (n_plates, 3), outward unit body-frame normals.
+      areas and optical coefficients: (n_plates,), areas in m^2.
+      sat_R_body2ECEF_hist: (n_times, 3, 3), orthonormal rotations
+          shared across the observer axis.
+
+    Assumes finite inputs and no mutual shadowing between plates.
+    Divide by mass_kg * c_m_per_s to obtain acceleration in m/s^2.
+    """
+    F = np.asarray(dF_beam_hist)
+    n = np.asarray(sat_plate_normals, dtype=np.float64)
+    A = np.asarray(sat_plate_areas, dtype=np.float64)
+    ca = np.asarray(sat_plate_ca, dtype=np.float64)
+    cd = np.asarray(sat_plate_cd, dtype=np.float64)
+    cs = np.asarray(sat_plate_cs, dtype=np.float64)
+    R = np.asarray(sat_R_body2ECEF_hist, dtype=np.float64)
+
+    n_observers, n_sources, n_times, _ = F.shape
+    out = np.zeros((n_observers * n_times, 3), dtype=np.float64)
+
+    if A.size == 0:
+        return out.reshape(n_observers, n_times, 3)
+
+    # Select nonzero vectors before normalization or plate calculations.
+    observer, source, time = np.nonzero(np.any(F, axis=-1))
+
+    if observer.size == 0:
+        return out.reshape(n_observers, n_times, 3)
+
+    beam = np.asarray(F[observer, source, time], dtype=np.float64)
+    del source
+
+    magnitude = np.sqrt(np.einsum("ki,ki->k", beam, beam))
+
+    # R.T @ beam: transform photon propagation directions to body frame.
+    direction = np.einsum("ki,kij->kj", beam, R[time])
+    direction /= magnitude[:, None]
+    del beam
+
+    # The only large beam-by-plate array: (n_nonzero_beams, n_plates).
+    mu = direction @ (-n.T)
+    np.maximum(mu, 0.0, out=mu)
+
+    # Absorption + incoming diffuse momentum.
+    force_body = (mu @ (A * (ca + cd)))[:, None] * direction
+
+    # Outgoing diffuse momentum.
+    force_body -= mu @ (n * ((2.0 / 3.0) * A * cd)[:, None])
+
+    # Specular momentum: reuse the cosine buffer for mu**2.
+    np.square(mu, out=mu)
+    force_body -= mu @ (n * (2.0 * A * cs)[:, None])
+    del mu
+
+    force_body *= magnitude[:, None]
+
+    # Sum sources at each observer/time, preserving repeated indices.
+    group = observer * n_times + time
+    out[:, 0] = np.bincount(
+        group, weights=force_body[:, 0], minlength=out.shape[0]
+    )
+    out[:, 1] = np.bincount(
+        group, weights=force_body[:, 1], minlength=out.shape[0]
+    )
+    out[:, 2] = np.bincount(
+        group, weights=force_body[:, 2], minlength=out.shape[0]
+    )
+
+    # Rotate only the final sums back to ECEF.
+    return np.einsum(
+        "tij,btj->bti", R, out.reshape(n_observers, n_times, 3)
+    )
+
 
 
 
@@ -918,8 +1220,8 @@ def get_smooth_daily_ae_hist(out_jd_array, rad_config, grid:Grid=None):
         datestr = jd_to_mmddyyyy(jd)
         a, e = load_sh_maps(datestr, rad_config)
         if method=="map_interp":
-            # a = np.zeros(len(full_lat))
-            # e = np.zeros(len(full_lat))
+            #a = np.zeros(len(full_lat))
+            #e = np.zeros(len(full_lat))
             a = expand_sh(a, full_lon, full_lat, rad_config['sh_normalization'])
             e = expand_sh(e, full_lon, full_lat, rad_config['sh_normalization'])
         all_a[i] = a
@@ -973,6 +1275,8 @@ def get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_arr
     ``"SW"`` returns just that map. With no ADM model, each result is the
     Lambertian scalar 1/pi. Otherwise ERBE maps have shape (np, n_toa, nt),
     even for static geometry (r_rel's time axis may have length 1 or nt).
+    Simplified ADM scenes have shape (n_toa,) and are shared across time
+    without tiling; the factors still depend on observer and solar geometry.
     Invisible cells are zero in both maps; night-side cells are zero only
     in SW. ``rad_config['ADM_interp']`` selects nearest bins (default) or
     linear angular interpolation. LW seasons are DJF/MAM/JJA/SON, selected
@@ -1016,6 +1320,12 @@ def get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_arr
         # Scene classification and cloud interpolation are shared by observers
         # and by SW/LW; only selected cells enter the ADM lookups.
         scene_types = get_erbe_scene_types(jd_array, toa_grid, rad_config)
+        if scene_types.shape == (toa_grid.n_points,):
+            selected_scene_types = scene_types[toa_idx]
+        elif scene_types.shape == (toa_grid.n_points, n_steps):
+            selected_scene_types = scene_types[toa_idx, time_idx]
+        else:
+            raise ValueError("ERBE scene types must have shape (n_toa,) or (n_toa, nt).")
         method = rad_config.get('ADM_interp', 'nearest')
 
         if use_lw:
@@ -1024,13 +1334,14 @@ def get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_arr
             colatitudes = 90.0 - toa_grid.stacked_grid_latlon[:, 0]
             factors = ERBE_LW_ADM.factors(
                 viewing_zenith_angles, colatitudes[toa_idx],
-                scene_types[toa_idx, time_idx], seasons[time_idx], method=method)
+                selected_scene_types, seasons[time_idx], method=method)
             factors *= 1 / np.pi
             lw_map[observer_idx, toa_idx, time_idx] = factors
             del factors
 
         if use_sw:
             sunlit = zeroed_cos_theta_s_hist[toa_idx, time_idx] != 0
+            selected_scene_types = selected_scene_types[sunlit]
             # Restrict solar/azimuth calculations to sunlit visible cells.
             observer_idx, toa_idx, time_idx = (idx[sunlit] for idx in (observer_idx, toa_idx, time_idx))
             selected_grid_u = selected_grid_u[sunlit]
@@ -1052,7 +1363,7 @@ def get_irradiance_to_radiance_map(r_rel, r_rel_norm_2, geometric_kernel, jd_arr
                 solar_zenith_angles=np.rad2deg(np.arccos(np.clip(cos_theta_s, -1, 1))),
                 viewing_zenith_angles=viewing_zenith_angles,
                 relative_azimuth_angles=np.rad2deg(np.arccos(np.clip(cos_rel_az, -1, 1))),
-                scene_types=scene_types[toa_idx, time_idx], method=method)
+                scene_types=selected_scene_types, method=method)
             factors *= 1 / np.pi
             sw_map[observer_idx, toa_idx, time_idx] = factors
 
@@ -1069,12 +1380,15 @@ def get_window_avg_maps(EEI_truth_name, jd_windows, map_name, grid: Grid):
     avg_map_array = [None] * len(jd_windows)
 
     for i, jd_window in enumerate(jd_windows):
+        print(f"Loading truth for window {i}")
 
         idxs = [(jd_vec_day[0]>=jd_window[0] and jd_vec_day[1]<=jd_window[1]) for jd_vec_day in truth_jd_arrays]
         idxs = np.squeeze(np.argwhere(idxs))
         all_maps = np.zeros((grid.n_points, len(idxs)))
-        
+
+        #print(f"Getting true avg maps...")
         for j, day_idx in enumerate(idxs):
+            #progress_bar(i, len(idxs))
             file_names, _ = get_file_names_and_existence(base_data_dir, day_idx, grid, create_dirs=False)
 
             #true_avg = np.load(os.path.join(truth_dir, file_names['daily_avg_net_800km']+'.npy'))
@@ -1084,6 +1398,38 @@ def get_window_avg_maps(EEI_truth_name, jd_windows, map_name, grid: Grid):
         avg_map_array[i] = grid.compute_time_avg_map(all_maps) #np.nanmean(all_maps, axis=1)
 
     return avg_map_array
+
+
+def get_toa_grid_from_rad_config(rad_config: dict, quadrature_order=None):
+
+    if quadrature_order is None:
+        if rad_config['Nmax']==2:
+            quadrature_order = 131
+        elif rad_config['Nmax']==45:
+            quadrature_order = 151
+            # NOTE: any intermediate cases to be added here (ideally based on convergence analysis)
+        elif rad_config['Nmax']==179:
+            quadrature_order = 251
+
+    if rad_config['earth_shape']=="spherical":
+        alt_km = 0
+        flattening = 0
+    elif rad_config['earth_shape']=="spherical_mean":
+        alt_km = constants.earth_radius(model='mean') - constants.earth_radius(model='WGS84')
+        flattening = 0
+    elif rad_config['earth_shape']=='WGS84':
+        alt_km = 0
+        flattening = constants.earth_flattening(model='WGS84')
+    elif rad_config['earth_shape']=='WGS84_TOA':
+        alt_km = 20
+        f_wgs84 = constants.earth_flattening(model='WGS84')
+        R_wgs84 = constants.earth_radius(model='WGS84')
+        flattening = 1 - ((R_wgs84 * (1-f_wgs84) + alt_km) / (R_wgs84 + alt_km))
+
+    return QuadratureGrid(alt_km=alt_km, order=quadrature_order, flattening=flattening)
+    
+
+
 
 ##############################################################################################
 # file storage functions #####################################################################
@@ -1095,9 +1441,18 @@ def get_subdir_EEI_truth(EEI_truth, series_type, grid_name="grid_quad_n131"): # 
                               series_type)
     return subdir
 
-def get_file_names_and_existence(base_data_dir, day_idx, grid: Grid, create_dirs=True):
+def get_file_names_and_existence(base_data_dir, day_idx, grid: Grid, 
+                                 rm_daily_hists=False, rm_SFF=False, create_dirs=True):
     
     all_out_file_types = get_required_files(grid)
+    if rm_SFF:
+        all_out_file_types = [f for f in all_out_file_types if "SFF" not in f]
+
+    # remove unfeasible storage options
+    if rm_daily_hists:
+        #if grid.n_points>5810: # lebedev order 131 grid has 5810 points
+        all_out_file_types = [f for f in all_out_file_types if (("hist" not in f) or ("surf_avg" in f))] # would be too much storage
+
     grid_data_dir = os.path.join(base_data_dir, grid.grid_name)
     
     if create_dirs:
@@ -1108,7 +1463,7 @@ def get_file_names_and_existence(base_data_dir, day_idx, grid: Grid, create_dirs
     all_file_names = {ftype: os.path.join(grid_data_dir, ftype, 'day_'+str(day_idx)) for ftype in all_out_file_types}
     file_existences = {ftype: (os.path.exists(fname_full+'.txt') or os.path.exists(fname_full+'.npy')) 
                         for ftype, fname_full in zip(all_out_file_types, all_file_names.values())}
-    
+
     return all_file_names, file_existences
 
 """toa: ['daily_hist_LW_toa', 'daily_hist_SW_toa', 'daily_hist_net_toa', 'daily_hist_net_toa_SFF',
@@ -1116,18 +1471,22 @@ def get_file_names_and_existence(base_data_dir, day_idx, grid: Grid, create_dirs
             ], """
 
 def save_toa_files(toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist, net_toa_day_hist_SFF,
-                   base_data_dir, day_idx, grid: Grid,
+                   all_file_names, file_existences, grid: Grid,
                    R_ECEF_to_SunFrame_day_hist=None): #, n_cores=4, save_SFF_hist=True):
-
-    all_file_names, file_existences = get_file_names_and_existence(base_data_dir, day_idx, grid)
+    # TODO: change base_data-Dir and day_idx for file dicts, sort out SFF (probably simplified)
+    #all_file_names, file_existences = get_file_names_and_existence(base_data_dir, day_idx, grid)
     
-    if not(file_existences['daily_hist_LW_toa']):
+    if not(file_existences.get('daily_hist_LW_toa', True)):
         print("Saving daily_hist_LW_toa file...")
         np.save(all_file_names['daily_hist_LW_toa'], toa_LW_day_hist)
 
-    if not(file_existences['daily_hist_SW_toa']):
+    if not(file_existences.get('daily_hist_SW_toa', True)):
         print("Saving daily_hist_SW_toa file...")
         np.save(all_file_names['daily_hist_SW_toa'], toa_SW_day_hist)
+
+    if not(file_existences.get('daily_hist_net_toa', True)):
+        print("Saving daily_hist_net_toa file...")
+        np.save(all_file_names['daily_hist_net_toa'], net_toa_day_hist)
 
     if (net_toa_day_hist_SFF is not None) and not(file_existences.get('daily_hist_net_toa_SFF_accurate')): #and save_SFF_hist:
         print("Saving daily_hist_net_toa file Sun-Fixed Frame...")
@@ -1138,10 +1497,44 @@ def save_toa_files(toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist, net_toa_d
 
     if not(file_existences.get('daily_avg_net_toa', True)): 
         print("Saving daily_avg_net_toa file...")
-        net_toa_daily_avg = grid.compute_time_avg_map(net_toa_day_hist)
+        net_toa_daily_avg = grid.compute_time_avg_map(net_toa_day_hist) # careful: is time still last dim?
         np.save(all_file_names['daily_avg_net_toa'], net_toa_daily_avg)
 
     if not(file_existences['daily_hist_net_toa_surf_avg']):
         print("Saving daily_hist_net_toa_surf_avg file...")
         toa_surf_avg_day_hist = grid.compute_surf_integral(net_toa_day_hist, average=True)
         np.save(all_file_names['daily_hist_net_toa_surf_avg'], toa_surf_avg_day_hist)
+
+"""
+"altitude": ['daily_hist_net_F_{alt_km}km', 'daily_hist_net_F_{alt_km}km_SFF_accurate',
+             'daily_avg_net_F_{alt_km}km', 'daily_avg_net_F_{alt_km}km_SFF_accurate',
+             'daily_surf_avg_net_{alt_km}km']"""
+
+def save_altitude_files(daily_hist_net_F_altitude, daily_hist_net_F_altitude_SFF, 
+                        file_names: dict, file_existences: dict, grid: Grid):
+
+    if not(file_existences.get(f"daily_hist_net_F_{grid.alt_km}km", True)):
+        print(f"Saving daily_hist_net_F_{grid.alt_km}km file...")
+        np.save(file_names[f"daily_hist_net_F_{grid.alt_km}km"], daily_hist_net_F_altitude)
+
+    if not(file_existences.get(f"daily_avg_net_F_{grid.alt_km}km", True)):
+        print(f"Saving daily_avg_net_F_{grid.alt_km}km file...")
+        daily_avg_net_F = np.mean(daily_hist_net_F_altitude, axis=1)
+        np.save(file_names[f"daily_avg_net_F_{grid.alt_km}km"], daily_avg_net_F)
+
+    if not(file_existences.get(f"daily_surf_avg_net_{grid.alt_km}km'", True)):
+        print(f"Saving daily_surf_avg_net_{grid.alt_km}km' file...")
+        daily_hist_net_Fr_altitude = F_vec_to_Fr(daily_hist_net_F_altitude, grid.stacked_grid_u)
+        daily_hist_surf_avg = grid.compute_surf_integral(daily_hist_net_Fr_altitude, average=True)
+        np.save(file_names[f"daily_surf_avg_net_{grid.alt_km}km"], daily_hist_surf_avg)
+
+    if daily_hist_net_F_altitude_SFF is not None:
+        if not(file_existences.get(f"daily_hist_net_F_{grid.alt_km}km_SFF_accurate", True)):
+            print(f"Saving daily_hist_net_F_{grid.alt_km}km_SFF_accurate file...")
+            np.save(file_names[f"daily_hist_net_F_{grid.alt_km}km_SFF_accurate"], daily_hist_net_F_altitude_SFF)
+
+        if not(file_existences.get(f"daily_avg_net_F_{grid.alt_km}km_SFF_accurate", True)):
+            print(f"Saving daily_avg_net_F_{grid.alt_km}km_SFF_accurate file...")
+            daily_avg_net_F_SFF = np.mean(daily_hist_net_F_altitude_SFF, axis=1)
+            np.save(file_names[f"daily_avg_net_F_{grid.alt_km}km_SFF_accurate"], daily_avg_net_F_SFF)
+        

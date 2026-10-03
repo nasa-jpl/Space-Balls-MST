@@ -2,7 +2,7 @@ import os, sys
 import numpy as np
 import importlib
 from SpaceBalls.paths import CONFIG_DIR
-sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
+#sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
 
 
 def get_TSI_1AU(jD, TSI_source, day_interp="step"): # this function already interpolates (linearly) - Do we want higher order?
@@ -164,6 +164,17 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["earth_shape"] = "spherical"    
         # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
 
+    if EEI_truth_name=="EEI_truth_05":
+        rad_config_dict["TSI_source"] = "constant"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "flat"
+        rad_config_dict["sh_normalization"] = "unnorm"
+        rad_config_dict["Nmax"] = 2
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "fully_circular"
+        rad_config_dict["earth_shape"] = "WGS84_TOA"
+        
+
     elif EEI_truth_name=="EEI_truth_1":
         rad_config_dict["TSI_source"] = "CERES"
         rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
@@ -260,8 +271,21 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["Nmax"] = 179
         rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
         rad_config_dict["ephemerides"] = "boa_0"
-        rad_config_dict["earth_shape"] = "spherical"
+        rad_config_dict["earth_shape"] = "WGS84_TOA"
         rad_config_dict["time_interp"] = "map_interp" # "sh_interp" # 
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+
+    elif EEI_truth_name=="EEI_truth_31":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "SYN1deg_fine"
+        rad_config_dict["sh_normalization"] = "4pi"
+        rad_config_dict["Nmax"] = 179
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "WGS84_TOA"
+        rad_config_dict["time_interp"] = "map_interp" # "sh_interp" # 
+        rad_config_dict["penumbra_method"] = "0.5"
         # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
 
     elif EEI_truth_name=="EEI_truth_35":
@@ -272,8 +296,21 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["Nmax"] = 45
         rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
         rad_config_dict["ephemerides"] = "boa_0"
-        rad_config_dict["earth_shape"] = "spherical"    
+        rad_config_dict["earth_shape"] = "WGS84_TOA"    
         rad_config_dict["time_interp"] = "map_interp" # "sh_interp"
+        # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
+
+    elif EEI_truth_name=="EEI_truth_351":
+        rad_config_dict["TSI_source"] = "CERES" # to add: TSI_interp: "step (default)", "linear", "cubic"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "historic_SYN1deg"
+        rad_config_dict["sh_normalization"] = "unnorm"
+        rad_config_dict["Nmax"] = 45
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "WGS84_TOA"    
+        rad_config_dict["time_interp"] = "map_interp" # "sh_interp"
+        rad_config_dict["penumbra_method"] = "0.5"
         # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
 
     elif EEI_truth_name=="EEI_truth_4":
@@ -284,9 +321,22 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["Nmax"] = 179
         rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
         rad_config_dict["ephemerides"] = "boa_0"
-        rad_config_dict["earth_shape"] = "spherical"
+        rad_config_dict["earth_shape"] = "WGS84_TOA"
         rad_config_dict["time_interp"] = "map_interp" # "sh_interp" # 
         rad_config_dict["ADM_model"] = "ERBE" # "sh_interp" # 
+
+    elif EEI_truth_name=="EEI_truth_41":
+        rad_config_dict["TSI_source"] = "CERES"
+        rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
+        rad_config_dict["sh_mode"] = "SYN1deg_fine"
+        rad_config_dict["sh_normalization"] = "4pi"
+        rad_config_dict["Nmax"] = 179
+        rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
+        rad_config_dict["ephemerides"] = "boa_0"
+        rad_config_dict["earth_shape"] = "WGS84_TOA"
+        rad_config_dict["time_interp"] = "map_interp" # "sh_interp" # 
+        rad_config_dict["ADM_model"] = "ERBE" # "sh_interp" # 
+        rad_config_dict["penumbra_method"] = "0.5"
 
     elif EEI_truth_name=="EEI_truth_42":
         rad_config_dict["TSI_source"] = "CERES"
@@ -296,7 +346,7 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["Nmax"] = 179
         rad_config_dict["jd_interval"] = [2458119.5, 2459945.5]
         rad_config_dict["ephemerides"] = "boa_0"
-        rad_config_dict["earth_shape"] = "spherical"
+        rad_config_dict["earth_shape"] = "WGS84_TOA"
         rad_config_dict["time_interp"] = "map_interp" # "sh_interp" # 
         rad_config_dict["ADM_model"] = "ERBE" # "sh_interp" #
         rad_config_dict["ADM_interp"] = "linear"

@@ -527,12 +527,12 @@ def get_erbe_scene_types(jd_array, toa_grid: Grid, rad_config: dict):
         11              Mostly Cloudy Over Land-Ocean Mix          0.50 - 0.95
         12              Overcast                                   0.95 - 1.00
 
-    Returns integer scene IDs with shape (toa_grid.n_points, len(jd_array)).
+    Returns integer scene IDs matching the cloud map shape: (toa_grid.n_points,)
+    for a static map, or (toa_grid.n_points, len(jd_array)) for a time series.
     Exact cloud-fraction boundaries belong to the lower-cloud bin: clear
     through 0.05, partly cloudy through 0.50, mostly cloudy through 0.95.
     Cloudy snow uses the cloudy land bins, and overcast applies to all surfaces.
-    The CERES cloud loader returns percentages; spline overshoot is clipped
-    to [0, 100] before conversion to fractions. Nonfinite values are rejected.
+    The CERES cloud loader returns fractions. Nonfinite values are rejected.
     """
 
     jd_array = np.atleast_1d(np.asarray(jd_array, dtype=float))
@@ -551,11 +551,11 @@ def get_erbe_scene_types(jd_array, toa_grid: Grid, rad_config: dict):
     cloud_fractions = np.asarray(
         get_ceres_cloud_fractions(jd_array, toa_grid, rad_config), dtype=float
     )
-    if cloud_fractions.shape != (toa_grid.n_points, jd_array.size):
-        raise ValueError("CERES cloud percentages must have shape (n_toa, nt).")
+    if cloud_fractions.shape not in ((toa_grid.n_points,),
+                                     (toa_grid.n_points, jd_array.size)):
+        raise ValueError("CERES cloud fractions must have shape (n_toa,) or (n_toa, nt).")
     if not np.all(np.isfinite(cloud_fractions)):
-        raise ValueError("CERES cloud percentages must be finite.")
-    #cloud_fractions = np.clip(cloud_percentages, 0.0, 100.0) / 100.0
+        raise ValueError("CERES cloud fractions must be finite.")
     cloud_bins = np.searchsorted([0.05, 0.50, 0.95], cloud_fractions, side='left')
     
     # Rows: ocean, land, snow, desert, coast. Columns: increasing cloud cover.
@@ -567,22 +567,33 @@ def get_erbe_scene_types(jd_array, toa_grid: Grid, rad_config: dict):
         [5, 8, 11, 12],
     ], dtype=np.intp)
 
-    return scene_ids[surface_types[:, None] - 1, cloud_bins]
+    surface_indices = surface_types - 1
+    if cloud_fractions.ndim == 2:
+        surface_indices = surface_indices[:, None]
+    return scene_ids[surface_indices, cloud_bins]
     
 
 def get_ceres_cloud_fractions(out_jd_array, toa_grid: Grid, rad_config: dict):
-    
-    n = 2 # number of days to load to built interpolator
-    jd_interp = get_jd_to_build_interp(n, out_jd_array, rad_config["jd_interval"])
 
-    all_cloud_fracs = [None] * len(jd_interp)
-    for i, jd in enumerate(jd_interp):
-        datestr = jd_to_mmddyyyy(jd)
-        all_cloud_fracs[i] = np.load(os.path.join(CONFIG_DIR, 'earth', 
-                                    'ADMs', 'CERES_cloud_fractions', datestr + '.npy'))
-    spline_cloud_fracs = make_interp_spline(jd_interp, np.stack(all_cloud_fracs), k=1)
+    if not("time_interp" in rad_config):
+        unique_mid_day_jd = np.unique(np.round(out_jd_array))
+        assert(len(unique_mid_day_jd)==1)
+        datestr = jd_to_mmddyyyy(unique_mid_day_jd[0])
+        cloud_fracs_reg_grid = np.load(os.path.join(CONFIG_DIR, 'earth', 
+                                       'ADMs', 'CERES_cloud_fractions', datestr + '.npy'))
 
-    cloud_fracs_reg_grid = spline_cloud_fracs(out_jd_array, extrapolate=False)
+    else:
+        
+        n = 2 # number of days to load to built interpolator
+        jd_interp = get_jd_to_build_interp(n, out_jd_array, rad_config["jd_interval"])
+
+        all_cloud_fracs = [None] * len(jd_interp)
+        for i, jd in enumerate(jd_interp):
+            datestr = jd_to_mmddyyyy(jd)
+            all_cloud_fracs[i] = np.load(os.path.join(CONFIG_DIR, 'earth', 
+                                        'ADMs', 'CERES_cloud_fractions', datestr + '.npy'))
+        spline_cloud_fracs = make_interp_spline(jd_interp, np.stack(all_cloud_fracs), k=1)
+        cloud_fracs_reg_grid = spline_cloud_fracs(out_jd_array, extrapolate=False)
+
     cloud_fracs = REG_1DEG_GRID.map_field_to_different_grid(cloud_fracs_reg_grid, toa_grid)
-
-    return (cloud_fracs/100)
+    return (cloud_fracs/100) # out shape is either (np_toa,) or (np_toa, nt)

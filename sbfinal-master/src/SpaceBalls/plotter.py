@@ -20,8 +20,8 @@ from scipy.stats import norm
 from SpaceBalls.sph_meshing import get_sphere_grid, sphere_field_interp, Grid, RegularLatLonGrid
 from SpaceBalls.utils import get_clean_lonlat_vecs_for_plot, get_two_perp_unit_vectors
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR
-sys.path.insert(0, str(CONFIG_DIR.parent)) 
-import config.constants as constants
+#sys.path.insert(0, str(CONFIG_DIR.parent)) 
+import SpaceBalls.constants as constants
 
 matplotlib.rcParams.update({
 
@@ -171,6 +171,8 @@ class Plotter:
             #     datetime_array_plot = datetime_array
             
             col_idx = np.remainder(i, len(cls.line_colors))
+            #print(f"Shape x: {np.shape(datetime_array)}")
+            #print(f"Shape y: {np.shape(y)}")
             ax.plot(datetime_array, y, label=label, # label=cls.raw(label), 
                     color=col_array[col_idx],
                      lw=lw_array[i], linestyle=cls.linestyles[i],
@@ -542,7 +544,8 @@ class Plotter:
             elif len(np.shape(data))==1:
                 data_mat = np.reshape(data, (grid.n_lat, grid.n_lon))
         
-        elif grid.grid_type_name == "quadrature":
+        #elif grid.grid_type_name == "quadrature":
+        else:
             regular_grid = RegularLatLonGrid(alt_km=grid.alt_km,
                                              n_lat=180*3, n_lon=360*3)
             data[np.isnan(data)] = 0
@@ -1042,8 +1045,27 @@ class Plotter:
                        normalized=True, add_kernel=False,
                        f_height=1, f_width=1, 
                        out_dir=None, file_name=None, out_fmt='.png', fit_normal=False,
-                       units=''):
-        
+                       units='', add_mean=False, add_std=False,
+                       stats_format='.4g', stats_color='black',
+                       label_placement='lines'):
+        """Plot a histogram with optional annotated summary statistics.
+
+        ``add_mean`` draws a solid line at the mean; ``add_std`` draws
+        dashed lines at mean +/- one standard deviation. Both work for
+        counts and probability densities, without fitting a distribution.
+        Standard deviation uses ddof=0, consistent with ``norm.fit``.
+        ``fit_normal`` retains both sets of lines and requires normalized=True.
+        ``stats_format`` is a Python number format for the annotations.
+        ``stats_color`` controls the statistical lines and labels (e.g.
+        'black' or 'navy'). ``label_placement='lines'`` places vertical
+        labels beside each line; 'corner' uses a summary in the upper left.
+        With add_kernel=True and no file_name, return the interpolator.
+        """
+        if fit_normal and not normalized:
+            raise ValueError('fit_normal requires normalized=True.')
+        if label_placement not in ('lines', 'corner'):
+            raise ValueError("label_placement must be 'lines' or 'corner'.")
+
         n_bins = cls.get_n_bins(len(data_vec))
         
         plt.figure(figsize=(cls.fig_width*f_width, cls.fig_height*f_height))
@@ -1053,30 +1075,61 @@ class Plotter:
         
         ylabel=r'Probability density' if normalized else r'Count'
         plt.ylabel(ylabel, fontsize=cls.font_size)
-        plt.xlabel(xlabel + ' (' + units + ')', fontsize=cls.font_size)
+        plt.xlabel(xlabel + (f' ({units})' if units else ''), fontsize=cls.font_size)
         #plt.ylim(bottom=0)
         
-        plt.legend(frameon=False, fontsize=cls.font_size)
         plt.grid(False)
         plt.tick_params(direction='in', length=3, width=0.8, labelsize=cls.font_size_red)
         
-        if fit_normal:
-            assert(normalized)
-            f, p = scipy.stats.normaltest(data_vec)
-            mu, std = norm.fit(data_vec)
-            xmin, xmax = plt.xlim()
-            x = np.linspace(xmin, xmax, 100)
-            plt.plot(x, norm.pdf(x, mu, std), 'r', linewidth=2)
-            plt.text(0.05, 0.95, "$\hat{\mu}="+f"{mu:.2f}\,$"+units+'\n'+
-                                  "$\hat{\sigma}="+f"{std:.2f}\,$"+units+'\n'+
-                                  "$p="+f"{p:.4e}$", 
-                    transform=plt.gca().transAxes, 
-                    verticalalignment='top',
-                    fontsize=cls.font_size_red
-                    )
-            plt.axvline(mu, color='r', lw=0.8)
-            plt.axvline(mu+std, color='r', lw=0.5, linestyle='--')
-            plt.axvline(mu-std, color='r', lw=0.5, linestyle='--')
+        if add_mean or add_std or fit_normal:
+            mu = np.mean(data_vec)
+            std = np.std(data_vec, ddof=0)
+            suffix = f' {units}' if units else ''
+            annotations = []
+            line_labels = []
+            if add_mean or fit_normal:
+                plt.axvline(mu, color=stats_color, lw=0.8, linestyle='-', zorder=3)
+                mean_label = rf'$\hat{{\mu}}={mu:{stats_format}}$' + suffix
+                annotations.append(mean_label)
+                line_labels.append((mu, mean_label, 3, 'left'))
+            if add_std or fit_normal:
+                std_label = rf'$\hat{{\sigma}}={std:{stats_format}}$' + suffix
+                annotations.append(std_label)
+                for sign, offset, alignment in ((-1, -3, 'right'), (1, 3, 'left')):
+                    position = mu + sign * std
+                    plt.axvline(position, color=stats_color, lw=0.5,
+                                linestyle='--', zorder=3)
+                    symbol = '-' if sign < 0 else '+'
+                    label = rf'$\hat{{\mu}}{symbol}\hat{{\sigma}}$: ' + std_label
+                    line_labels.append((position, label, offset, alignment))
+
+            if label_placement == 'lines':
+                ax = plt.gca()
+                for position, label, offset, alignment in line_labels:
+                    ax.annotate(label, xy=(position, 0.97),
+                                xycoords=ax.get_xaxis_transform(),
+                                xytext=(offset, 0), textcoords='offset points',
+                                rotation=90, ha=alignment, va='top',
+                                fontsize=cls.font_size_red, color=stats_color,
+                                bbox=dict(facecolor='white', edgecolor='none',
+                                          alpha=0.85, pad=1.5), zorder=4)
+                annotations = []
+
+            if fit_normal and std > 0:
+                xmin, xmax = plt.xlim()
+                x = np.linspace(xmin, xmax, 400)
+                plt.plot(x, norm.pdf(x, mu, std), color=stats_color, linewidth=2)
+                if len(data_vec) >= 8:
+                    _, p = scipy.stats.normaltest(data_vec)
+                    annotations.append(rf'$p={p:.4e}$')
+
+            if annotations:
+                plt.text(0.05, 0.95, '\n'.join(annotations),
+                         transform=plt.gca().transAxes,
+                         verticalalignment='top', fontsize=cls.font_size_red,
+                         color=stats_color,
+                         bbox=dict(facecolor='white', edgecolor='none', alpha=0.85,
+                                   pad=3), zorder=4)
             
 
         if add_kernel:
@@ -1091,8 +1144,6 @@ class Plotter:
             
             plt.plot(x_vec_plot, y_vec, color='black', lw=1.1)
             
-            if file_name is None:
-                return y_interp
         
         for spine in plt.gca().spines.values():
             spine.set_linewidth(0.8)
@@ -1100,7 +1151,10 @@ class Plotter:
         
         if file_name is not None:
             out_dir = out_dir if out_dir is not None else './'        
-            plt.savefig(out_dir+file_name+out_fmt, dpi=600, bbox_inches='tight')
+            plt.savefig(os.path.join(out_dir, file_name+out_fmt), dpi=600, bbox_inches='tight')
+
+        if add_kernel and file_name is None:
+            return y_interp
     
 
 # full ChatGPT:

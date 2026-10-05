@@ -35,16 +35,20 @@ for day_idx in range(len(time_array)):
     print(f"Computing day {day_idx+1}/{len(time_array)}")
     day_label = np.datetime_as_string(time_array[day_idx], unit='D')
 
-    a_day = np.flipud(a_daily_array[day_idx,:,:])
-    sh_a = fit_sh_field(ceres_grid.vectorize_if_needed(a_day), 
-                        ceres_grid.stacked_grid_latlon[:,1], 
-                        ceres_grid.stacked_grid_latlon[:,0], lmax=179)
-    print(f"Saving {os.path.join(out_dir, 'Albedo_'+day_label)}")
-    np.save(os.path.join(out_dir, 'Albedo_'+day_label), sh_a.coeffs)
-    
-    e_day = np.flipud(e_daily_array[day_idx,:,:])
-    sh_e = fit_sh_field(ceres_grid.vectorize_if_needed(e_day), 
-                        ceres_grid.stacked_grid_latlon[:,1], 
-                        ceres_grid.stacked_grid_latlon[:,0], lmax=179)
-    np.save(os.path.join(out_dir, 'Thermal_'+day_label), sh_e.coeffs)
-    print(f"Saving {os.path.join(out_dir, 'Thermal_'+day_label)}")
+    albedo_fname = os.path.join(out_dir, 'Albedo_'+day_label+'.npy')
+    if not(os.path.exists(albedo_fname)):
+        a_day = np.flipud(a_daily_array[day_idx,:,:])
+        sh_a = fit_sh_field(ceres_grid.vectorize_if_needed(a_day), 
+                            ceres_grid.stacked_grid_latlon[:,1], 
+                            ceres_grid.stacked_grid_latlon[:,0], lmax=179)
+        print(f"Saving {albedo_fname}")
+        np.save(albedo_fname, sh_a.coeffs)
+
+    emissivity_fname = os.path.join(out_dir, 'Thermal_'+day_label+'.npy')
+    if not(os.path.exists(emissivity_fname)):
+        e_day = np.flipud(e_daily_array[day_idx,:,:])
+        sh_e = fit_sh_field(ceres_grid.vectorize_if_needed(e_day), 
+                            ceres_grid.stacked_grid_latlon[:,1], 
+                            ceres_grid.stacked_grid_latlon[:,0], lmax=179)
+        np.save(emissivity_fname, sh_e.coeffs)
+        print(f"Saving {emissivity_fname}")

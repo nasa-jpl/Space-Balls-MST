@@ -867,8 +867,6 @@ def _integrate_net_vec(dF_beam_hist, sat_plate_normals, sat_plate_areas, sat_pla
 
     return net_vec
 
-import numpy as np
-
 
 def _integrate_net_vec_codex(
     dF_beam_hist,

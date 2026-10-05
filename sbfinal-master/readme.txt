@@ -7,9 +7,9 @@ conda activate monte168
 cd <cloned-repo>/sbfinal-master
 python -m pip install --no-deps -e .
 
-2. Move all the albedo_and_thermal folder (sent separately) to config/earth/
+2. Download the config folder (sent separately)
 
-3. Open the src/SpaceBalls/paths file and set the desired OUTPUT_DIR. MEDIA_DIR is only for pre/postproc results (unrelated to basic_daily_loop.py)
+3. Open the src/SpaceBalls/paths file and set the desired OUTPUT_DIR and the CONFIG_DIR pointing to the config folder. MEDIA_DIR is only for pre/postproc results (unrelated to basic_daily_loop.py)
 
 4. Modify the example_input.json input file or create a new one. Outputs will be saved in a folder in OUTPUT_DIR with the same name as the input file
 NOTES:

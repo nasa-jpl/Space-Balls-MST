@@ -1,8 +1,13 @@
 import os, sys
 import numpy as np
 import importlib
+from pathlib import Path
 from SpaceBalls.paths import CONFIG_DIR
-#sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
+
+# Imports beginning with 'config.' need the directory containing config on sys.path.
+config_parent = str(Path(CONFIG_DIR).resolve().parent)
+if config_parent not in sys.path:
+    sys.path.insert(0, config_parent)
 
 
 def get_TSI_1AU(jD, TSI_source, day_interp="step"): # this function already interpolates (linearly) - Do we want higher order?
@@ -164,7 +169,7 @@ def radiation_settings_from_EEI_truth_name(EEI_truth_name):
         rad_config_dict["earth_shape"] = "spherical"    
         # 2018-01-01 00:00:00.000 to 2023-01-01 00:00:00.000
 
-    if EEI_truth_name=="EEI_truth_05":
+    elif EEI_truth_name=="EEI_truth_05":
         rad_config_dict["TSI_source"] = "constant"
         rad_config_dict["earth_components"] = ["Albedo", "Thermal"] # ["Albedo", "Thermal"], case sensitive
         rad_config_dict["sh_mode"] = "flat"

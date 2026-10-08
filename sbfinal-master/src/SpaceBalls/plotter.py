@@ -100,9 +100,9 @@ class Plotter:
         
         for i, (label, (x,y)) in enumerate(scatter_dict.items()):
             ax.scatter(x, y, label=label, # label=cls.raw(label), 
-                        color='cyan', #cls.line_colors[col_idx], 
-                           marker='.',
-                           s=8, alpha=scatter_alpha)
+                        color='r', #cls.line_colors[col_idx], 
+                           marker='x',
+                           s=4, alpha=scatter_alpha)
             col_idx = col_idx+1
 
         ax.set_ylabel(ylabel, fontsize=cls.font_size)
@@ -124,6 +124,8 @@ class Plotter:
 
         fig.show()
         #ax.set_xlim(datetime_array[0], datetime_array[-1])
+
+        return fig, ax
 
 
     @classmethod

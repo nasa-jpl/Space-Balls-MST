@@ -17,9 +17,9 @@ from scipy.special import lpmn
 from astropy.time import Time as Time_astropy
 
 from SpaceBalls.paths import CONFIG_DIR, INPUT_DIR, OUTPUT_DIR
-sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
-sys.path.insert(0, str(INPUT_DIR.parent))  # parent of 'config'
-import config.constants as constants
+#sys.path.insert(0, str(CONFIG_DIR.parent))  # parent of 'config'
+#sys.path.insert(0, str(INPUT_DIR.parent))  # parent of 'config'
+import SpaceBalls.constants as constants
 from SpaceBalls.utils import load_input_file, progress_bar, get_Earth_SH_gravity_model#, get_mesh_from_fibonacci_sphere
 
 import SpaceBalls.radiation_settings as rad_settings
@@ -275,20 +275,35 @@ class SpaceBallsSim():
         np.save(os.path.join(data_out_dir, 'jd_vec'+'.npy'), output_manager.jd_array)
         #np.savetxt(data_out_dir + 'jd_vec.csv', output_manager.jd_array)
 
-        for i, pf in enumerate(self.force_manager.pressforces):
+        try:
+            # Enable caching to avoid recomputing the coordinate rotations
+            # for the ScPlate normal vectors as part of the solarPressure 
+            # computation. Note that the cache system does NOT detect changes 
+            # to models, so the cache should only be selectively enabled for 
+            # a series of computations.
             t1 = time.time()
-            acc_hist = output_manager.find_accel_hist(pf)
+            cache = M.CacheControlBoa.read( self.force_manager.boa )
+            cache.push( True )
             t2 = time.time()
-            print(f"Time to compute {self.force_manager.force_names[i]}: {t2-t1}")
-                        
-            file_name = self.force_manager.force_names[i]
-            output_manager.write_acc(acc_hist, data_out_dir, file_name)
+            print(f"Cache overhead time: {t2-t1}")
 
-            self.all_acc_hist[i] = acc_hist
-            self.all_acc_norm_hist[i] = np.linalg.norm(acc_hist, ord=2, axis=1)
+
+            for i, pf in enumerate(self.force_manager.pressforces):
+                t1 = time.time()
+                acc_hist = output_manager.find_accel_hist(pf)
+                t2 = time.time()
+                print(f"Time to compute {self.force_manager.force_names[i]}: {t2-t1}")
+                            
+                file_name = self.force_manager.force_names[i]
+                output_manager.write_acc(acc_hist, data_out_dir, file_name)
+
+                self.all_acc_hist[i] = acc_hist
+                self.all_acc_norm_hist[i] = np.linalg.norm(acc_hist, ord=2, axis=1)
+        finally:
+            # Turn off caching.
+            cache.pop()
 
         self.all_acc_hist = np.stack(self.all_acc_hist, axis=2)  # size: [nsteps, 3, nforces]
-
         output_manager.find_r_hist()
 
         file_name = 'xyz_ecef'

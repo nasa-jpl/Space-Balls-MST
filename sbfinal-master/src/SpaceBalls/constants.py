@@ -20,7 +20,19 @@ def earth_radius(model='WGS84', units='km', monte_units=False):
         radius = radius_km * units.km
 
     return radius
-    
+
+def sun_radius(units='km', monte_units=False):
+    radius_km = 695700
+    if units=="m":
+        radius = radius_km * 1e3
+    elif units=="km":
+        radius = radius_km
+
+    if monte_units:
+        import mpy.units as units
+        radius = radius_km * units.km
+
+    return radius
 
 def earth_flattening(model='WGS84'):
     if model=="WGS84":

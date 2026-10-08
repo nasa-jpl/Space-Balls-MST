@@ -13,7 +13,7 @@ from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR, INPUT_DIR, OUTPUT_DIR, PROJE
 from SpaceBalls.radiation_settings import radiation_settings_from_EEI_truth_name, get_n_days_EEI_truth, get_TSI_1AU
 from SpaceBalls.radiation_fluxes_preprocessing import get_toa_grid_from_rad_config, get_R_SunFrame_hist, get_cos_theta_s_lim, get_subdir_EEI_truth, get_EEI_truth_daily_jd_arrays, mid_day_jd_array_from_jd_interval, get_window_avg_maps, F_vec_to_Fr
 from SpaceBalls.utils import load_input_file, progress_bar, normal_smoother, interp_zeroes_in_2D_data_array, compute_orbital_period, make_list_str_key, get_rolling_jd_windows, get_2D_to_1D_idx, find_idxs, fit_cos_sin_fixed_freq, notch_filter
-from SpaceBalls.sph_meshing import Grid, QuadratureGrid, RegularLatLonGrid, fit_sh_field, interp_zeroes_in_grid_data
+from SpaceBalls.sph_meshing import Grid, QuadratureGrid, RegularLatLonGrid, fit_sh_field, interp_zeroes_in_grid_data, compute_avg_d_eq_deg
 import SpaceBalls.input_database_manager as input_manager
 import SpaceBalls.constants as constants
 from SpaceBalls.plotter import Plotter
@@ -21,6 +21,7 @@ from SpaceBalls.utils import get_Rotation, nanrms, generate_noise_time_series, d
 
 AU = constants.astronomical_unit(units='km')
 RE = constants.earth_radius(units='km')
+R_SUN = constants.sun_radius(units='km')
 TOA_S_0 = 4*np.pi*RE**2      # basic TOA surface area in km2 (only for EEI truths 0, 1, 2)
 LIGHT_SPEED = constants.light_speed(units='m/s')
 
@@ -610,7 +611,7 @@ def fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_map_array, g
     out_map_array = [None] * len(avg_map_array)
     #cos_theta_s_lim = get_cos_theta_s_lim(grid.alt_km)
 
-    #make_plot_bool_array[0] = True
+    make_plot_bool_array[70] = True
     
     for i, avg_map in enumerate(avg_map_array):
         out_map_array[i] = fill_unobserved_cells_with_theta_s_interp(avg_map, grid, make_plots=make_plot_bool_array[i])
@@ -644,7 +645,8 @@ def fill_unobserved_cells_map_array_with_theta_s_fit_accurate(input_names, avg_m
 
 
 
-def fill_unobserved_cells_with_theta_s_interp(avg_map, grid: Grid, meas_vec_for_fit=None, cos_theta_s_vec_for_fit=None, make_plots=False):
+def fill_unobserved_cells_with_theta_s_interp(avg_map, grid: Grid, mode="biquadratic",
+                                              meas_vec_for_fit=None, cos_theta_s_vec_for_fit=None, make_plots=False):
     
     cos_theta_s_lim = get_cos_theta_s_lim(grid.alt_km)
 
@@ -664,44 +666,117 @@ def fill_unobserved_cells_with_theta_s_interp(avg_map, grid: Grid, meas_vec_for_
         meas_vec_for_fit = avg_map[nonzero_idxs]
         cos_theta_s_vec_for_fit = map_cos_theta_s_vec[nonzero_idxs]
 
-    c, m, n = compute_meas_vs_cos_theta_s_fit(meas_vec_for_fit, cos_theta_s_vec_for_fit, 
-                                                cos_theta_s_lim, plot_bool=make_plots)
-    avg_map[zero_idxs] = meas_vs_cos_theta_s_function(map_cos_theta_s_vec[zero_idxs], cos_theta_s_lim, c, m, n)
+    grid_cell_size = compute_avg_d_eq_deg(grid) 
+    #eclipse_buffer = np.cos(np.radians(grid_cell_size))/2
+    theta_s_lim = np.acos(cos_theta_s_lim)
+    cos_theta_s_lim_2 = np.cos(theta_s_lim + np.radians(grid_cell_size)/2)
+    eclipse_buffer = np.abs(cos_theta_s_lim - cos_theta_s_lim_2)
+    c, coeffs = compute_meas_vs_cos_theta_s_fit(meas_vec_for_fit, cos_theta_s_vec_for_fit, 
+                                                cos_theta_s_lim, mode=mode, plot_bool=make_plots,
+                                                cos_theta_s_lim_buffer=eclipse_buffer)
+    avg_map[zero_idxs] = meas_vs_cos_theta_s_function(map_cos_theta_s_vec[zero_idxs], cos_theta_s_lim, c, coeffs, 
+                                                      mode, cos_theta_s_lim_buffer=eclipse_buffer)
 
     #if make_plots: Plotter.plot_geo_data_new(avg_map, grid=grid, add_coastlines=False)
 
     return avg_map
 
+def linear_fit(x, y):
+    A_mat = np.column_stack((x, np.ones_like(x)))
+    A_mat_T = np.transpose(A_mat)
+    return np.linalg.solve(A_mat_T @ A_mat, A_mat_T @ y)
 
-def compute_meas_vs_cos_theta_s_fit(meas_array, cos_theta_s_array, cos_theta_s_lim, cos_theta_s_lim_buffer=0.025, plot_bool=False):
+def quadratic_fit(x, y):
+    A_mat = np.column_stack((x**2, x, np.ones_like(x)))
+    A_mat_T = np.transpose(A_mat)
+    return np.linalg.solve(A_mat_T @ A_mat, A_mat_T @ y)
+
+def compute_meas_vs_cos_theta_s_fit(meas_array, cos_theta_s_array, cos_theta_s_lim, 
+                                    mode, cos_theta_s_lim_buffer=0.025, plot_bool=False):
+
+    #cos_theta_s_lim_buffer = R_SUN / (2*AU)
 
     assert(len(cos_theta_s_array)==len(meas_array))
-
-    # linear part:
-    idxs_linear = (cos_theta_s_array > (cos_theta_s_lim+cos_theta_s_lim_buffer))
-    A_mat = np.column_stack((cos_theta_s_array[idxs_linear], np.ones_like(cos_theta_s_array[idxs_linear])))
-    A_mat_T = np.transpose(A_mat)
-    m, n = np.linalg.solve(A_mat_T @ A_mat, A_mat_T @ meas_array[idxs_linear])
+    assert((mode=="linear") or (mode=="quadratic") or (mode=="bilinear") or (mode=="biquadratic"))
 
     # constant part:
-    c = np.mean(meas_array[cos_theta_s_array <= (cos_theta_s_lim-cos_theta_s_lim_buffer)])
+    idxs_constant = cos_theta_s_array <= (cos_theta_s_lim-cos_theta_s_lim_buffer)
+    c = np.mean(meas_array[idxs_constant])
+
+    if (mode=="linear") or (mode=="quadratic"):
+    # linear part:
+        idxs_linear = (cos_theta_s_array > (cos_theta_s_lim+cos_theta_s_lim_buffer))
+        if mode=="linear":
+            coeffs = linear_fit(cos_theta_s_array[idxs_linear], meas_array[idxs_linear])
+        else:
+            coeffs = quadratic_fit(cos_theta_s_array[idxs_linear], meas_array[idxs_linear])
+
+    else:
+        idxs_linear_1 = ((cos_theta_s_array > (cos_theta_s_lim+cos_theta_s_lim_buffer)) & (cos_theta_s_array<0))
+        idxs_linear_2 = (cos_theta_s_array >= 0)
+
+        if mode=="bilinear":
+            coeffs_1 = linear_fit(cos_theta_s_array[idxs_linear_1], meas_array[idxs_linear_1])
+            coeffs_2 = linear_fit(cos_theta_s_array[idxs_linear_2], meas_array[idxs_linear_2])
+        else:
+            coeffs_1 = quadratic_fit(cos_theta_s_array[idxs_linear_1], meas_array[idxs_linear_1])
+            coeffs_2 = quadratic_fit(cos_theta_s_array[idxs_linear_2], meas_array[idxs_linear_2])
+                    
+        coeffs = (coeffs_1, coeffs_2)
+                
 
     if plot_bool:
         x = np.sort(cos_theta_s_array)
-        y = meas_vs_cos_theta_s_function(x, cos_theta_s_lim, c, m, n)
-        Plotter.plot_data({'Fit': (x, y)}, {'Data': (cos_theta_s_array, meas_array)},
-                          xlabel='cos(theta_s)', ylabel='Radial flux (W/m$^2$)', scatter_alpha=0.05)
+        y = meas_vs_cos_theta_s_function(x, cos_theta_s_lim, c, coeffs, mode, cos_theta_s_lim_buffer)
+        fig, ax = Plotter.plot_data({'Fit': (x, y)}, {'Data': (cos_theta_s_array, meas_array)},
+                          xlabel='cos(theta_s)', ylabel='Radial flux (W/m$^2$)', 
+                          scatter_alpha=0.05, f_height=0.7)
+        
+        #ax.set_xlim([cos_theta_s_lim-0.05, cos_theta_s_lim+0.05])
 
-    return c, m, n
+    return c, coeffs
 
-def meas_vs_cos_theta_s_function(cos_theta_s, cos_theta_s_lim, c, m, n):
-
-    idxs_ct = cos_theta_s <= cos_theta_s_lim
-    idxs_linear = ~idxs_ct
-
+def meas_vs_cos_theta_s_function(cos_theta_s, cos_theta_s_lim, c, coeffs, mode, cos_theta_s_lim_buffer):
+    
+    #cos_theta_s_lim_buffer = R_SUN / (2*AU)
     meas = np.zeros_like(cos_theta_s)
+    all_idxs = np.arange(len(cos_theta_s))
+    idxs_ct = cos_theta_s <= (cos_theta_s_lim - cos_theta_s_lim_buffer)
     meas[idxs_ct] = c
-    meas[idxs_linear] = m * cos_theta_s[idxs_linear] + n
+    #idxs_ct = cos_theta_s <= cos_theta_s_lim
+    #idxs_linear = ~idxs_ct
+    
+    if (mode=="linear") or (mode=="quadratic"):
+        idxs_linear = (cos_theta_s > (cos_theta_s_lim + cos_theta_s_lim_buffer))
+        idxs_transition = ~(idxs_ct + idxs_linear) #(~np.isin(all_idxs, idxs_ct)) * (~np.isin(all_idxs, idxs_linear))
+        if mode=="linear":
+            m, n = coeffs
+            q = 0
+        elif mode=="quadratic":
+            q, m, n = coeffs
+        meas[idxs_linear] = q * (cos_theta_s[idxs_linear])**2 + m * cos_theta_s[idxs_linear] + n
+    
+    else:
+        idxs_linear = ((cos_theta_s > (cos_theta_s_lim + cos_theta_s_lim_buffer)) & (cos_theta_s<0))
+        idxs_linear_2 = (cos_theta_s >= 0)
+        idxs_transition = ~(idxs_ct + idxs_linear + idxs_linear_2)  # (~np.isin(all_idxs, idxs_ct)) * (~np.isin(all_idxs, idxs_linear))
+        if mode=="bilinear":
+            m, n = coeffs[0]
+            m2, n2 = coeffs[1]
+        else:
+            q, m, n = coeffs[0]
+            q2, m2, n2 = coeffs[1]
+                
+        meas[idxs_linear] = q * (cos_theta_s[idxs_linear])**2 + m * cos_theta_s[idxs_linear] + n
+        meas[idxs_linear_2] = q2 * (cos_theta_s[idxs_linear_2])**2 + m2 * cos_theta_s[idxs_linear_2] + n2
+
+    if np.any(idxs_transition):
+        last_constant_cos = cos_theta_s_lim - cos_theta_s_lim_buffer
+        first_linear_cos = cos_theta_s_lim + cos_theta_s_lim_buffer
+
+        meas[idxs_transition] = np.interp(cos_theta_s[idxs_transition],
+                                        [last_constant_cos, first_linear_cos],
+                                        [c, m*first_linear_cos + n])
     
     return meas
 
@@ -1157,6 +1232,7 @@ def check_EEI_consistency(input_names):
 
 def get_true_EEI_time_series(EEI_name, n_days=None, grid_name=None):
     if EEI_name=="EEI_truth_351": EEI_name = "EEI_truth_35" # patch
+    if EEI_name=="EEI_truth_41": EEI_name = "EEI_truth_4"
     
     EEI_settings = radiation_settings_from_EEI_truth_name(EEI_name)
     if grid_name is None:
@@ -1165,7 +1241,8 @@ def get_true_EEI_time_series(EEI_name, n_days=None, grid_name=None):
         else:
             grid = get_toa_grid_from_rad_config(EEI_settings)
             grid_name = grid.grid_name
-    
+
+    print(f"Loading TOA truth from {grid_name}")
     if n_days is None:
         n_days = get_n_days_EEI_truth(EEI_name)
         store_concatenated_file = True

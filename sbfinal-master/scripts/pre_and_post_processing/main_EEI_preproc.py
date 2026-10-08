@@ -5,7 +5,7 @@ from SpaceBalls.sph_meshing import RegularLatLonGrid, QuadratureGrid
 
 if __name__ == '__main__':
 
-    all_EEIs = ["EEI_truth_4", "EEI_truth_3"] # , "EEI_truth_4", "EEI_truth_42"] # "EEI_truth_35", 
+    all_EEIs = ["EEI_truth_1"] # , "EEI_truth_4", "EEI_truth_42"] # "EEI_truth_35", 
     compute_altitude = True
     compute_toa = False
 
@@ -26,7 +26,7 @@ if __name__ == '__main__':
         if compute_altitude:
             # altitude case:
             altitude = 800
-            grid_order = 201
+            grid_order = 325
             grid = QuadratureGrid(alt_km=altitude, 
                                 order=grid_order,    
                                 flattening=0  # altitude grid is fully spherical

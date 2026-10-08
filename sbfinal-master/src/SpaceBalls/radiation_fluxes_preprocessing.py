@@ -21,6 +21,7 @@ from SpaceBalls.ADM_manager import load_erbe_sw_adm, get_erbe_scene_types, load_
 AU = constants.astronomical_unit(units='km')
 RE = constants.earth_radius(units='km')
 LIGHT_SPEED = constants.light_speed()
+R_SUN = constants.sun_radius()
 STEP_MINUTES = 1 # DO NOT CHANGE - must be equal to the one used for the files in solar_ephemerides
 ERBE_SW_ADM = load_erbe_sw_adm(os.path.join(CONFIG_DIR, 'earth', 'ADMs', 'erbe_SW_ADM.dat'))
 ERBE_LW_ADM = load_erbe_lw_adm(os.path.join(CONFIG_DIR, 'earth', 'ADMs', 'erbe_LW_ADM.dat'))
@@ -185,8 +186,10 @@ def get_daily_hist_net_at_altitude(base_data_dir, day_idx, mid_day_jd, day_jd_ar
     if file_existences.get('daily_hist_net_F_'+str(grid.alt_km)+'km', False):
         pass
         # load daily_hist_net_F_altitude and compute the rest (this option should not really ever happen if the preproc scripts have been run correctly)
-    else:
-        toa_grid = get_toa_grid_from_rad_config(rad_config, quadrature_order=201)
+    
+    #else:
+    if True:
+        toa_grid = get_toa_grid_from_rad_config(rad_config) #, quadrature_order=201)
 
         if sff:
             R_ECEF_to_SunFrame_day_hist = get_R_SunFrame_hist(rad_config["ephemerides"], mid_day_jd)
@@ -762,22 +765,27 @@ def compute_F_hist_at_sat_r_hist(EEI_truth_name, sat_r_hist, sat_jd_hist, toa_gr
 
     r_sun_hist = get_r_sun_jd_hist(rad_config, sat_jd_hist)
     TSI_1AU_day = rad_settings.get_TSI_1AU(sat_jd_hist, rad_config['TSI_source'])
+    t1 = time.time()
     srp_F_hist = get_solar_incoming_day_hist(r_sun_hist, TSI_1AU_day, 
                                              sat_r_hist[None,...], grid_bool=False,
                                              toa_grid=toa_grid,
                                              penumbra_method=rad_config.get('penumbra_method'))
+    t2 = time.time()    
+    print(f"Time SRP 1: {t2-t1}")
     if erp_wl_split:
         erp_F_LW_hist, erp_F_SW_hist = compute_earth_F_at_altitude(sat_jd_hist, rad_config, 
                                                 sat_r_hist[None,...], toa_grid,
                                                 store_dF=store_dF, wavelength="split")
-
+        t3 = time.time()
+        print(f"Time ERP 1: {t3-t2}")
         return erp_F_LW_hist, erp_F_SW_hist, srp_F_hist
     
     else:
         erp_F_hist = compute_earth_F_at_altitude(sat_jd_hist, rad_config, 
                                                 sat_r_hist[None,...], toa_grid,
                                                 store_dF=store_dF, wavelength="sum")
-
+        t3 = time.time()
+        print(f"Time ERP 1: {t3-t2}")
         return erp_F_hist, srp_F_hist
 
     # TODO: accelerations for plated satellites, which are not just a constant times F
@@ -823,13 +831,19 @@ def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hist, sat_jd_hi
                                                            toa_grid,
                                                            store_dF=True,
                                                            erp_wl_split=False)
+        t1 = time.time()
         net_erp = _integrate_net_vec_codex(erp_dF_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
                                     sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
                                     sat_R_body2ECEF_hist)
+        t2 = time.time()
+        print(f"Time ERP 2: {t2-t1}")
 
+    t1 = time.time()
     net_srp = _integrate_net_vec_codex(srp_F_hist[:,None,:,:], sat_dict["plate_normals"], sat_dict["plate_areas"], 
                                        sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
                                        sat_R_body2ECEF_hist)
+    t2 = time.time()
+    print(f"Time SRP 2: {t2-t1}")
 
     factor = 1 / (sat_dict['mass'] * LIGHT_SPEED)
     a_erp, a_srp = factor * net_erp, factor * net_srp
@@ -1218,8 +1232,6 @@ def get_smooth_daily_ae_hist(out_jd_array, rad_config, grid:Grid=None):
         datestr = jd_to_mmddyyyy(jd)
         a, e = load_sh_maps(datestr, rad_config)
         if method=="map_interp":
-            #a = np.zeros(len(full_lat))
-            #e = np.zeros(len(full_lat))
             a = expand_sh(a, full_lon, full_lat, rad_config['sh_normalization'])
             e = expand_sh(e, full_lon, full_lat, rad_config['sh_normalization'])
         all_a[i] = a

@@ -975,6 +975,14 @@ def get_reshaped_grid(x,y):
     return X_vectorized, Y_vectorized, np.shape(X_grid)
 
 
+def compute_avg_d_eq_deg(grid: Grid):
+    n_p = grid.n_points
+    print(f"n_points = {n_p}")
+    avg_A = grid.total_area / n_p
+    avg_d = np.sqrt(avg_A / np.pi)
+    avg_d_eq_deg = 360 * avg_d / 40_000
+
+    return avg_d_eq_deg
 
 # spherical harmonic stuff?
 

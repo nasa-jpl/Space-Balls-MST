@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os, sys
 import numpy as np
 from astropy.time import Time
@@ -28,7 +30,7 @@ ERBE_LW_ADM = load_erbe_lw_adm(os.path.join(CONFIG_DIR, 'earth', 'ADMs', 'erbe_L
             
 REQUIRED_FILES = {
     "toa": ['daily_hist_LW_toa', 'daily_hist_SW_toa', 'daily_hist_net_toa', 'daily_hist_net_toa_SFF_accurate',
-            'daily_avg_net_toa', 'daily_hist_net_toa_surf_avg', # 'daily_hist_net_toa_lat_avg'
+            'daily_avg_net_toa', 'daily_hist_net_toa_surf_avg', 'daily_hist_earth_toa_surf_avg' # 'daily_hist_net_toa_lat_avg'
             ],
     "altitude": ['daily_hist_net_F_{alt_km}km', 'daily_hist_net_F_{alt_km}km_SFF_accurate', 'daily_avg_net_Fr_{alt_km}km_SFF_accurate',
                  'daily_avg_net_F_{alt_km}km', 'daily_avg_net_F_{alt_km}km_SFF_accurate',
@@ -76,6 +78,8 @@ def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, 
         rm_daily_hists = False
     print(f"Compute all days: {compute_all_days}")
 
+    map_provider =  DailyAEMapProvider(grid, rad_config, max_days=16)
+
     for day_idx, jd_array in zip(idxs_days_to_loop, daily_jd_arrays):
 
         print(f"Now computing: daily hist for day {day_idx} at {grid.alt_km}km")
@@ -99,18 +103,19 @@ def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, 
                                                                                     mid_day_jd, 
                                                                                     jd_array, 
                                                                                     rad_config, 
-                                                                                    grid)
+                                                                                    grid,
+                                                                                    map_provider=map_provider)
             save_toa_files(toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist, net_toa_day_hist_SFF,
                    file_names, file_existences, grid)
 
         elif grid.alt_km>0 and not(all(file_existences.values())):
             
             daily_hist_net_F_altitude = get_daily_hist_net_at_altitude(
-                                    base_data_dir, day_idx, mid_day_jd, jd_array, rad_config, grid)
+                                    mid_day_jd, jd_array, rad_config, grid)
             
             if compute_SFF and not(file_existences[f"daily_hist_net_F_{grid.alt_km}km_SFF_accurate"]):
                 daily_hist_net_F_altitude_SFF = get_daily_hist_net_at_altitude(
-                                                    base_data_dir, day_idx, mid_day_jd, jd_array, rad_config, grid,
+                                                    mid_day_jd, jd_array, rad_config, grid,
                                                     sff=True)
             else:
                 daily_hist_net_F_altitude_SFF = None
@@ -119,14 +124,14 @@ def compute_radiation_maps(EEI_truth_name, grid: Grid, selected_days_idxs=None, 
                                 file_names, file_existences, grid)
 
 
-def get_daily_hist_toa(base_data_dir, day_idx, mid_day_jd, day_jd_array, rad_config, grid: Grid, load_emission=True, load_net=True):
+def get_daily_hist_toa(base_data_dir, day_idx, mid_day_jd, day_jd_array, rad_config, grid: Grid, load_emission=True, load_net=True, *, map_provider:DailyAEMapProvider=None):
     
     all_file_names, file_existences = get_file_names_and_existence(base_data_dir, day_idx, grid)
     #toa_emission_day_hist, net_toa_day_hist = None, None
 
     if not(file_existences["daily_hist_LW_toa"]) or not(file_existences["daily_hist_SW_toa"]) or not(file_existences["daily_hist_net_toa"]):  # requires recomputing
         print("Computing daily hist TOA...")
-        toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist = compute_flux_hist_toa(day_jd_array, rad_config, grid)
+        toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist = compute_flux_hist_toa(day_jd_array, rad_config, grid, map_provider=map_provider)
         #toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist = compute_daily_hist_toa(mid_day_jd, rad_config, TSI_1AU_day, grid)
     
     else:
@@ -178,18 +183,21 @@ def get_hist_toa_new(EEI_truth_name, jd_array, grid: Grid, load_emission=True, l
 
 
 
-def get_daily_hist_net_at_altitude(base_data_dir, day_idx, mid_day_jd, day_jd_array, 
-                                   rad_config: dict, grid: Grid, sff:bool=False):
+def get_daily_hist_net_at_altitude(mid_day_jd, day_jd_array, 
+                                   rad_config: dict, grid: Grid, sff:bool=False,
+                                   toa_grid:Grid=None, return_separate=False,
+                                   compute_solar=True):
     
-    all_file_names, file_existences = get_file_names_and_existence(base_data_dir, day_idx, grid)
-    
-    if file_existences.get('daily_hist_net_F_'+str(grid.alt_km)+'km', False):
-        pass
-        # load daily_hist_net_F_altitude and compute the rest (this option should not really ever happen if the preproc scripts have been run correctly)
+    # all_file_names, file_existences = get_file_names_and_existence(base_data_dir, day_idx, grid)
+    # 
+    # if file_existences.get('daily_hist_net_F_'+str(grid.alt_km)+'km', False):
+    #     pass
+    #     # load daily_hist_net_F_altitude and compute the rest (this option should not really ever happen if the preproc scripts have been run correctly)
     
     #else:
     if True:
-        toa_grid = get_toa_grid_from_rad_config(rad_config) #, quadrature_order=201)
+        if toa_grid is None:
+            toa_grid = get_toa_grid_from_rad_config(rad_config) #, quadrature_order=201)
 
         if sff:
             R_ECEF_to_SunFrame_day_hist = get_R_SunFrame_hist(rad_config["ephemerides"], mid_day_jd)
@@ -198,20 +206,25 @@ def get_daily_hist_net_at_altitude(base_data_dir, day_idx, mid_day_jd, day_jd_ar
         else:
             stacked_r = grid.stacked_grid_r[:,None,:]
 
-        r_sun_day = get_r_sun_day_hist(rad_config["ephemerides"], mid_day_jd)
-        TSI_1AU_day = rad_settings.get_TSI_1AU(day_jd_array, rad_config['TSI_source'])
-        daily_hist_solar_F_altitude = get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, 
-                                                                  stacked_r, grid, toa_grid,
-                                                                  penumbra_method=rad_config.get('penumbra_method'))
-        if sff:
-            daily_hist_solar_F_altitude = apply_SFF_rotation(R_ECEF_to_SunFrame_day_hist, daily_hist_solar_F_altitude, "ECEF_to_SFF")
+        if compute_solar:
+            print("Computing solar F...")
+            r_sun_day = get_r_sun_day_hist(rad_config["ephemerides"], mid_day_jd)
+            TSI_1AU_day = rad_settings.get_TSI_1AU(day_jd_array, rad_config['TSI_source'])
+            daily_hist_solar_F_altitude = get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, 
+                                                                    stacked_r, grid, toa_grid,
+                                                                    penumbra_method=rad_config.get('penumbra_method'))
+            if sff:
+                daily_hist_solar_F_altitude = apply_SFF_rotation(R_ECEF_to_SunFrame_day_hist, daily_hist_solar_F_altitude, "ECEF_to_SFF")
+        else:
+            daily_hist_solar_F_altitude = None
+        
         # daily_hist_solar_Fr_altitude = F_vec_to_Fr(daily_hist_solar_F_altitude, grid.stacked_grid_u)
         # Plotter.plot_geo_data_new(daily_hist_solar_Fr_altitude[:,0], grid, 
         #                           file_name='sun_Fr_ECEF_0', add_coastlines=True, make_symmetric_cmap=True)
         # Plotter.plot_geo_data_new(daily_hist_solar_Fr_altitude[:,700], grid, 
         #                           file_name='sun_Fr_ECEF_700', add_coastlines=True, make_symmetric_cmap=True)
 
-        
+        print("Computing Earth F...")
         daily_hist_earth_F_altitude = compute_earth_F_at_altitude(day_jd_array, rad_config, stacked_r, toa_grid)
 
         if sff:
@@ -220,11 +233,12 @@ def get_daily_hist_net_at_altitude(base_data_dir, day_idx, mid_day_jd, day_jd_ar
         # Plotter.plot_geo_data_new(daily_hist_earth_Fr_altitude[:,700], grid, 
         #                           file_name='earth_Fr_ECEF_700', add_coastlines=True, make_symmetric_cmap=False)
 
+        if return_separate:
+            return daily_hist_solar_F_altitude, daily_hist_earth_F_altitude
 
-        daily_hist_net_F_altitude = daily_hist_solar_F_altitude + daily_hist_earth_F_altitude
-
-
-    return daily_hist_net_F_altitude
+        else:
+            daily_hist_net_F_altitude = daily_hist_solar_F_altitude + daily_hist_earth_F_altitude
+            return daily_hist_net_F_altitude
 
 
 # deprecated function
@@ -269,7 +283,7 @@ def compute_daily_hist_toa(mid_day_jd, rad_config, TSI_1AU_day, grid: Grid):
     return LW_outgoing_day_hist_toa, SW_outgoing_day_hist_toa, net_toa_day_hist
 """
 
-def compute_flux_hist_toa(jd_array, rad_config, grid: Grid, compute_net=True):
+def compute_flux_hist_toa(jd_array, rad_config, grid: Grid, compute_net=True, *, map_provider:DailyAEMapProvider=None):
     
     
     TSI_1AU_jd_array = rad_settings.get_TSI_1AU(jd_array, rad_config['TSI_source'])
@@ -297,13 +311,14 @@ def compute_flux_hist_toa(jd_array, rad_config, grid: Grid, compute_net=True):
     else:
         # else: we want to interpolate the a/e maps to the 1-min time resolution
         print("Getting smooth daily ae hist...")
-        a_hist, e_hist = get_smooth_daily_ae_hist(jd_array, rad_config, grid)
+        a_hist, e_hist = get_smooth_daily_ae_hist(jd_array, rad_config, grid, map_provider=map_provider)
 
-
+    print("Computing LW and SW outgoing hists...")
     LW_outgoing_day_hist_toa = e_hist / 4 * TSI_Earth_day_vec[None, :] # here we DO use the TSI at the center of the Earth (Knocke model and Monte docs)
     SW_outgoing_day_hist_toa = zeroed_cos_theta_s_day_hist_toa * a_hist * TSI_Earth_day_vec[None, :]
 
     if compute_net:
+        print("Computing LW and SW outgoing hists...")
         solar_incoming_day_hist_toa = get_solar_incoming_day_hist(r_sun_hist, TSI_1AU_jd_array, grid.stacked_grid_r, grid)
         # now solar_incoming_day_hist_toa is the full F vector
         solar_incoming_day_hist_toa = F_vec_to_Fr(solar_incoming_day_hist_toa, grid.stacked_grid_u)
@@ -318,6 +333,7 @@ def compute_flux_hist_toa(jd_array, rad_config, grid: Grid, compute_net=True):
 
     return LW_outgoing_day_hist_toa, SW_outgoing_day_hist_toa, net_toa_day_hist
 
+# og^2 version
 """
 def compute_earth_F_at_altitude_old(jd_array, rad_config, stacked_r, toa_grid: Grid, store_dF=False): # , n_cores):
 
@@ -400,7 +416,9 @@ def compute_earth_F_at_altitude_old(jd_array, rad_config, stacked_r, toa_grid: G
     return emission_F_hist
 """
 
-def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid: Grid, store_dF=False, wavelength="sum"): # , n_cores):
+# og version (inefficiently splitting across time instead of observers)
+def compute_earth_F_at_altitude_og(jd_array, rad_config: dict, stacked_r, toa_grid: Grid, 
+                                store_dF=False, wavelength="sum", *, map_provider:DailyAEMapProvider=None): # , n_cores):
 
     assert(len(np.shape(stacked_r))==3)
     n_p = np.shape(stacked_r)[0]
@@ -413,7 +431,7 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
     if ADM_model is None: nt = n_steps_r 
     else: nt = n_steps  # nt is the most constraining one to build the arrays after this
 
-    max_ram_GB = 8
+    max_ram_GB = 7
     max_nt = 8e9 * max_ram_GB / (64 * toa_grid.n_points * n_p * 3)
     n_chunks = np.max([1, int(np.floor(nt / max_nt))])
     if n_chunks>n_steps: n_chunks = n_steps # temporary patch if memory resists
@@ -429,7 +447,10 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
    
     for i, jd_array in enumerate(jd_chunks):
         print(f"Computing chunk {i+1}/{n_chunks}...")
-        toa_LW_hist, toa_SW_hist, _ = compute_flux_hist_toa(jd_array, rad_config, toa_grid, compute_net=False)
+        toa_LW_hist, toa_SW_hist, _ = compute_flux_hist_toa(jd_array, rad_config, toa_grid, 
+                                                            compute_net=False, map_provider=map_provider)
+        toa_LW_hist, toa_SW_hist = toa_grid.vectorize_if_needed(toa_LW_hist), toa_grid.vectorize_if_needed(toa_SW_hist)
+        
         #toa_LW_hist, toa_SW_hist = np.zeros((toa_grid.n_points, len(jd_array))), np.zeros((toa_grid.n_points, len(jd_array)))
         #toa_LW_hist, toa_SW_hist = np.random.rand(toa_grid.n_points, len(jd_array)), np.random.rand(toa_grid.n_points, len(jd_array))
 
@@ -476,6 +497,207 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
     else:
         emission_F_hist = np.concatenate(emission_F_hist, axis=1) # np.vstack(emission_F_hist) # we're here - vstack does not work if len of time axis is 1??
         return emission_F_hist
+
+# new version (currently stable; checked to give the same result as og)
+def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid: Grid, 
+                                store_dF=False, wavelength="sum", *, map_provider:DailyAEMapProvider=None): # , n_cores):
+
+    assert(len(np.shape(stacked_r))==3)
+    n_p = np.shape(stacked_r)[0]
+    n_steps_r = np.shape(stacked_r)[1]
+    n_steps = len(jd_array)
+    assert((n_steps_r==1) or (n_steps_r==n_steps))
+    assert((wavelength=="sum") or (wavelength=="split") or (wavelength=="LW") or (wavelength=="SW"))
+
+    ADM_model = rad_config.get('ADM_model')
+    if ADM_model is None: nt = n_steps_r 
+    else: nt = n_steps  # nt is the most constraining one to build the arrays after this
+
+    max_ram_GB = 9
+    max_np = 8e9 * max_ram_GB / (64 * toa_grid.n_points * nt * 3)
+    n_chunks = np.max([1, int(np.floor(n_p / max_np))])
+    
+    print(f"Splitting observers into {n_chunks} chunks")
+    stacked_r_chunks = np.array_split(stacked_r, n_chunks, axis=0)
+    if wavelength=="split":
+        emission_F_LW_hist = [None] * n_chunks
+        emission_F_SW_hist = [None] * n_chunks
+    else:
+        emission_F_hist = [None] * n_chunks
+
+
+    # we assume a TOA daily hist will always be storable into the RAM
+    toa_LW_hist, toa_SW_hist, _ = compute_flux_hist_toa(jd_array, rad_config, toa_grid, 
+                                                        compute_net=False, map_provider=map_provider)
+    toa_LW_hist, toa_SW_hist = toa_grid.vectorize_if_needed(toa_LW_hist), toa_grid.vectorize_if_needed(toa_SW_hist)
+    
+    #toa_LW_hist, toa_SW_hist = np.zeros((toa_grid.n_points, len(jd_array))), np.zeros((toa_grid.n_points, len(jd_array)))
+    #toa_LW_hist, toa_SW_hist = np.random.rand(toa_grid.n_points, len(jd_array)), np.random.rand(toa_grid.n_points, len(jd_array))
+
+    for i, stacked_r in enumerate(stacked_r_chunks):
+        print(f"Computing chunk {i+1}/{n_chunks}...")
+
+        print("Computing flux...")
+        r_rel, r_rel_norm_2, geometric_kernel = compute_geometry(stacked_r, toa_grid)
+
+        print(f"Getting ADMs...")
+        LW_I_to_L_map, SW_I_to_L_map = get_irradiance_to_radiance_map(
+            r_rel, r_rel_norm_2, geometric_kernel, jd_array,
+            toa_grid, rad_config, ADM_model=ADM_model, rad_type="both"
+        )
+        del r_rel_norm_2
+
+        # 4. Compute flux vector integral
+        print(f"Computing integral with einsum...")
+        if wavelength=="split":
+            emission_F_LW_hist[i], emission_F_SW_hist[i] = (
+                                 compute_earh_F_integral(toa_LW_hist, toa_SW_hist,
+                                                        LW_I_to_L_map, SW_I_to_L_map,
+                                                        geometric_kernel, r_rel, 
+                                                        toa_grid.integration_weights,
+                                                        wavelength=wl, store_dF=store_dF, 
+                                                        ADM_model=ADM_model) for wl in ["LW", "SW"])
+        else:
+            emission_F_hist[i] = compute_earh_F_integral(toa_LW_hist, toa_SW_hist,
+                                                        LW_I_to_L_map, SW_I_to_L_map,
+                                                        geometric_kernel, r_rel, 
+                                                        toa_grid.integration_weights,
+                                                        wavelength=wavelength, store_dF=store_dF, 
+                                                        ADM_model=ADM_model)
+    observer_axis = 0
+    
+    if wavelength=="split":
+        emission_F_LW_hist = np.concatenate(emission_F_LW_hist, axis=observer_axis) # np.vstack(emission_F_LW_hist)
+        emission_F_SW_hist = np.concatenate(emission_F_SW_hist, axis=observer_axis) # np.vstack(emission_F_SW_hist)
+        return emission_F_LW_hist, emission_F_SW_hist
+
+    else:
+        emission_F_hist = np.concatenate(emission_F_hist, axis=observer_axis) # np.vstack(emission_F_hist) # we're here - vstack does not work if len of time axis is 1??
+        return emission_F_hist
+
+
+def compute_geometry(stacked_r, toa_grid: Grid):
+
+        # 1. Compute all relative vectors
+    r_rel = stacked_r[:,None,:,:] - toa_grid.stacked_grid_r[None,:,None,:] 
+        # 2. Compute norm of relative vectors
+    r_rel_norm_2 = np.einsum('ijtk,ijtk->ijt', r_rel, r_rel)   # norm of all r_rel squared
+        # 3. Compute all geometric kernels
+    geometric_kernel = np.einsum('ijtk,jk->ijt', r_rel, toa_grid.stacked_grid_u) / (r_rel_norm_2**2) # this is cos(alpha)/(r_rel_norm**3)
+    np.maximum(geometric_kernel, 0, out=geometric_kernel) # set negative cosines(alpha) to zero
+
+    return r_rel, r_rel_norm_2, geometric_kernel
+
+
+# codex version: checked to give the same as mine, but breaking into too many chunks and apparently much slower?
+def compute_earth_F_at_altitude_codex(jd_array, rad_config: dict, stacked_r, toa_grid: Grid,
+                              store_dF=False, wavelength="sum", *, max_ram_GB=50):
+    """Compute Earth flux, chunking time and observers to fit a memory budget.
+
+    ``stacked_r`` has shape (n_p, 1, 3) for static observers or
+    (n_p, n_steps, 3) for moving observers. Results have shape
+    (n_p, n_steps, 3), or (n_p, n_toa, n_steps, 3) with ``store_dF``.
+    ``wavelength="split"`` returns the LW and SW results separately.
+
+    ``max_ram_GB`` is an estimated temporary-array budget in decimal GB,
+    excluding input arrays and the full returned arrays. The estimate allows
+    for geometry, TOA histories, ADM work arrays and integral intermediates;
+    it is not a limit on total process memory.
+    """
+    stacked_r = np.asarray(stacked_r)
+    jd_array = np.asarray(jd_array)
+    assert stacked_r.ndim == 3 and stacked_r.shape[2] == 3
+    n_p, n_steps_r, _ = stacked_r.shape
+    n_steps = len(jd_array)
+    assert n_steps_r == 1 or n_steps_r == n_steps
+    assert wavelength in ("sum", "split", "LW", "SW")
+    if not np.isfinite(max_ram_GB) or max_ram_GB <= 0:
+        raise ValueError("max_ram_GB must be finite and positive.")
+
+    ADM_model = rad_config.get('ADM_model')
+    wavelengths = ("LW", "SW") if wavelength == "split" else (wavelength,)
+    result_shape = ((n_p, toa_grid.n_points, n_steps, 3) if store_dF
+                    else (n_p, n_steps, 3))
+    if n_p == 0 or n_steps == 0:
+        results = tuple(np.empty(result_shape) for _ in wavelengths)
+        return results if wavelength == "split" else results[0]
+
+    itemsize = np.dtype(np.result_type(stacked_r.dtype,
+                                     toa_grid.stacked_grid_r.dtype,
+                                     toa_grid.stacked_grid_u.dtype,
+                                     toa_grid.integration_weights.dtype,
+                                     np.float64)).itemsize
+    # Per observer: vectors, squared norms, kernels and geometry temporaries.
+    geometry_bytes = 8 * itemsize * toa_grid.n_points
+    # Per observer and time: integral output/intermediates, plus ADM lookups.
+    observer_time_bytes = 6 * itemsize * (toa_grid.n_points if store_dF else 1)
+    if ADM_model is not None:
+        observer_time_bytes += 64 * itemsize * toa_grid.n_points
+    if n_steps_r != 1:
+        observer_time_bytes += geometry_bytes
+        geometry_bytes = 0
+    # TOA histories and their temporaries are shared across observer chunks.
+    toa_time_bytes = 16 * itemsize * toa_grid.n_points
+    max_bytes = max_ram_GB * 1e9
+
+    # First shorten time; partition observers when even one step is too big.
+    observer_chunk_size = min(n_p, int((max_bytes - toa_time_bytes)
+                                     // (geometry_bytes + observer_time_bytes)))
+    if observer_chunk_size < 1:
+        raise MemoryError("max_ram_GB is too small for one observer and one time step.")
+    time_chunk_size = min(n_steps, int((max_bytes - observer_chunk_size * geometry_bytes)
+                                      // (toa_time_bytes + observer_chunk_size * observer_time_bytes)))
+    n_observer_chunks = (n_p + observer_chunk_size - 1) // observer_chunk_size
+    n_time_chunks = (n_steps + time_chunk_size - 1) // time_chunk_size
+    print(f"Splitting day into {n_time_chunks} time chunks and {n_observer_chunks} observer chunks")
+    # Allocate each final array once, using the dtype returned by the integral.
+    results = [None] * len(wavelengths)
+
+    for time_start in range(0, n_steps, time_chunk_size):
+        time_stop = min(time_start + time_chunk_size, n_steps)
+        time_slice = slice(time_start, time_stop)
+        jd_chunk = jd_array[time_slice]
+        print(f"Computing time chunk {time_start // time_chunk_size + 1}/{n_time_chunks}...")
+        toa_LW_hist, toa_SW_hist, _ = compute_flux_hist_toa(
+            jd_chunk, rad_config, toa_grid, compute_net=False)
+        #toa_LW_hist, toa_SW_hist = np.zeros((toa_grid.n_points, len(jd_array))), np.zeros((toa_grid.n_points, len(jd_array)))
+        toa_LW_hist = toa_grid.vectorize_if_needed(toa_LW_hist)
+        toa_SW_hist = toa_grid.vectorize_if_needed(toa_SW_hist)
+
+        for observer_start in range(0, n_p, observer_chunk_size):
+            observer_stop = min(observer_start + observer_chunk_size, n_p)
+            observer_slice = slice(observer_start, observer_stop)
+            stacked_r_chunk = (stacked_r[observer_slice] if n_steps_r == 1
+                               else stacked_r[observer_slice, time_slice])
+            print(f"Computing observer chunk {observer_start // observer_chunk_size + 1}/{n_observer_chunks}...")
+            r_rel = stacked_r_chunk[:, None, :, :] - toa_grid.stacked_grid_r[None, :, None, :]
+            r_rel_norm_2 = np.einsum('ijtk,ijtk->ijt', r_rel, r_rel)
+            geometric_kernel = (np.einsum('ijtk,jk->ijt', r_rel, toa_grid.stacked_grid_u)
+                                / (r_rel_norm_2**2))
+            np.maximum(geometric_kernel, 0, out=geometric_kernel)
+            LW_I_to_L_map, SW_I_to_L_map = get_irradiance_to_radiance_map(
+                r_rel, r_rel_norm_2, geometric_kernel, jd_chunk,
+                toa_grid, rad_config, ADM_model=ADM_model, rad_type="both")
+            del r_rel_norm_2
+
+            for band_idx, wl in enumerate(wavelengths):
+                chunk_result = compute_earh_F_integral(
+                    toa_LW_hist, toa_SW_hist, LW_I_to_L_map, SW_I_to_L_map,
+                    geometric_kernel, r_rel, toa_grid.integration_weights,
+                    wavelength=wl, store_dF=store_dF, ADM_model=ADM_model)
+                if results[band_idx] is None:
+                    results[band_idx] = np.empty(result_shape, dtype=chunk_result.dtype)
+                if store_dF:
+                    results[band_idx][observer_slice, :, time_slice, :] = chunk_result
+                else:
+                    results[band_idx][observer_slice, time_slice, :] = chunk_result
+                del chunk_result
+
+            # Release this chunk before allocating the next chunk's geometry.
+            del r_rel, geometric_kernel, LW_I_to_L_map, SW_I_to_L_map
+        del toa_LW_hist, toa_SW_hist
+
+    return tuple(results) if wavelength == "split" else results[0]
 
 
 def compute_earh_F_integral(toa_LW_hist, toa_SW_hist, LW_I_to_L_map, SW_I_to_L_map, 
@@ -550,7 +772,7 @@ def compute_earh_F_integral(toa_LW_hist, toa_SW_hist, LW_I_to_L_map, SW_I_to_L_m
             return F_hist_LW
 
 
-def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid:Grid=None, 
+def get_solar_incoming_day_hist_og(r_sun_day, TSI_1AU_day, stacked_r, grid:Grid=None, 
                                 toa_grid:Grid=None, penumbra_method=None, grid_bool=True): # toa_grid input for penumbra (TODO)
     # TODO: so this function can be called with a satellite r_hist, change grid input for stacked_r? shapes TBD...
     # NOTE: the same code now works with TSI_1AU sized (n_steps,) instead of single float
@@ -569,6 +791,7 @@ def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid:Grid=Non
     else:
         # # instead: filter out eclipse for a general Earth shape and accounting for penumbra (Adhya et al 2003) 
         # #          so the function zeroed_cos_theta_s_day_hist is no longer needed, and grid input can then be removed
+        print(f"Entering penumbra calculation with method: {penumbra_method}")
         shadow_f = compute_shadow_f(stacked_r, r_sun_day, toa_grid, 
                                     penumbra_method=penumbra_method)
         grid_u_sun_hist_filtered = grid_u_sun_hist * shadow_f[...,None]  
@@ -578,8 +801,75 @@ def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid:Grid=Non
     return solar_F_day_hist 
 
 
+def get_solar_incoming_day_hist(r_sun_day, TSI_1AU_day, stacked_r, grid:Grid=None,
+                                toa_grid:Grid=None, penumbra_method=None, grid_bool=True,
+                                *, max_ram_GB=5):
+    """Return solar flux vectors, chunking the non-TOA calculation.
+
+    With ``grid_bool and grid.is_TOA()``, delegate to the original function
+    unchanged; ``max_ram_GB`` does not apply to that path.
+
+    Otherwise, ``max_ram_GB`` estimates temporary-array memory in decimal
+    GB, excluding inputs and the full (n_points, n_steps, 3) output. Static
+    (n_points, 3) and (n_points, 1, 3) observers and moving
+    (n_points, n_steps, 3) observers are supported.
+    """
+    if grid_bool and grid.is_TOA():
+        return get_solar_incoming_day_hist_og(
+            r_sun_day, TSI_1AU_day, stacked_r, grid, toa_grid,
+            penumbra_method=penumbra_method, grid_bool=grid_bool)
+    if not np.isfinite(max_ram_GB) or max_ram_GB <= 0:
+        raise ValueError("max_ram_GB must be finite and positive.")
+    # Shadow geometry needs about 512 bytes per observer/time pair; allow
+    # additional room for this caller's directions, distances and fluxes.
+    max_pairs = int((max_ram_GB * 1e9) // 768)
+    if max_pairs < 1:
+        raise MemoryError("max_ram_GB is too small for one observer and one time step.")
+    stacked_r = np.asarray(stacked_r)
+    r_sun_day = np.asarray(r_sun_day)
+    if stacked_r.ndim not in (2, 3) or stacked_r.shape[-1] != 3:
+        raise ValueError("stacked_r must have shape (n_points, 3) or (n_points, n_steps, 3).")
+    if r_sun_day.ndim != 2 or r_sun_day.shape[-1] != 3:
+        raise ValueError("r_sun_day must have shape (n_steps, 3).")
+    if stacked_r.ndim == 2:
+        stacked_r = stacked_r[:, None, :]
+    n_points, n_steps = len(stacked_r), len(r_sun_day)
+    if stacked_r.shape[1] not in (1, n_steps):
+        raise ValueError("The observer time axis must have length 1 or n_steps.")
+    # A broadcast view preserves scalar, time-series and per-observer TSI
+    # inputs without allocating a full irradiance history.
+    tsi = np.asarray(TSI_1AU_day)
+    if tsi.ndim != 0:
+        tsi = np.broadcast_to(tsi, (n_points, n_steps))
+    print(f"Entering penumbra calculation with method: {penumbra_method}")
+    time_chunk_size = max(1, min(n_steps, max_pairs))
+    observer_chunk_size = max(1, max_pairs // time_chunk_size)
+    solar_F_day_hist = None
+    # Evaluate an empty block too, preserving validation and output dtype.
+    for point_start in range(0, max(1, n_points), observer_chunk_size):
+        point_slice = slice(point_start, point_start + observer_chunk_size)
+        for time_start in range(0, max(1, n_steps), time_chunk_size):
+            time_slice = slice(time_start, time_start + time_chunk_size)
+            observers = (stacked_r[point_slice] if stacked_r.shape[1] == 1
+                         else stacked_r[point_slice, time_slice])
+            sun = r_sun_day[time_slice]
+            displacement, distance, direction = get_grid_r_sun_hist(sun, observers)
+            del displacement
+            tsi_chunk = tsi if tsi.ndim == 0 else tsi[point_slice, time_slice]
+            irradiance = tsi_chunk * (AU / distance)**2
+            shadow_f = compute_shadow_f(observers, sun, toa_grid,
+                penumbra_method=penumbra_method, max_ram_GB=max_ram_GB)
+            filtered_direction = direction * shadow_f[..., None]
+            chunk_flux = -filtered_direction * irradiance[..., None]
+            if solar_F_day_hist is None:
+                solar_F_day_hist = np.empty((n_points, n_steps, 3), dtype=chunk_flux.dtype)
+            solar_F_day_hist[point_slice, time_slice] = chunk_flux
+            del distance, direction, irradiance, shadow_f, filtered_direction, chunk_flux
+    return solar_F_day_hist
+
+
 def compute_shadow_f(stacked_r, r_sun_day, toa_grid: Grid,
-                     *, penumbra_method="0.5"):
+                     *, penumbra_method="0.5", max_ram_GB=0.1):
     """Return illumination factors with shape (n_points, n_steps).
 
     Positions are geocentric, in km, in a common frame with Earth's polar
@@ -588,24 +878,34 @@ def compute_shadow_f(stacked_r, r_sun_day, toa_grid: Grid,
     history is (n_steps, 3). The occulting ellipsoid has equatorial radius
     RE + toa_grid.alt_km and polar radius scaled by 1 - flattening.
 
-    ``smooth_shadow=False`` uses a point Sun and returns 0 or 1. True uses
-    two apparent solar limb rays in the Earth-observer-Sun plane, following
-    the Adhya approach, and returns 0, 0.5, or 1. Despite its historical
-    name, this switch does not produce a continuous penumbra transition.
+    ``penumbra_method=None`` uses a point Sun and returns 0 or 1. "0.5"
+    uses two apparent solar limb rays in the Earth-observer-Sun plane,
+    following the Adhya approach, and returns 0, 0.5, or 1.
     Two rays approximate an oblate Earth's full apparent silhouette; they
     are not an exact solar-disc/ellipse overlap calculation.
 
     Surface observers looking outward are illuminated; inward rays are
     occulted. A tangent contact away from the observer counts as occulted.
     Interior observers are occulted. Partial and annular eclipses both use
-    the penumbra method (currently only "constant", giving 0.5).
-    """
-    smooth_shadow = False if penumbra_method is None else True
+    the penumbra method (currently only "0.5").
 
+    Geometry is evaluated in observer/time chunks. ``max_ram_GB`` is an
+    estimated temporary-array budget in decimal GB, excluding inputs and
+    the returned float64 array (8 * n_points * n_steps bytes). It is not a
+    limit on total process memory. Input conversion and validation are
+    chunked too, avoiding a full float64 copy of a moving-observer array.
+    """
     if (penumbra_method is not None) and (penumbra_method != "0.5"):
         raise ValueError("Only penumbra_method='0.5' is implemented.")
-    observers = np.asarray(stacked_r, dtype=float)
-    sun = np.asarray(r_sun_day, dtype=float)
+    if not np.isfinite(max_ram_GB) or max_ram_GB <= 0:
+        raise ValueError("max_ram_GB must be finite and positive.")
+    # Allow for simultaneously live vectors, masks, limb-ray intersection
+    # temporaries and float64 conversion buffers, including aligned rays.
+    max_pairs = int(max_ram_GB * (1e9 / 512))
+    if max_pairs < 1:
+        raise MemoryError("max_ram_GB is too small for one observer and one time step.")
+    observers = np.asarray(stacked_r)
+    sun = np.asarray(r_sun_day)
     if observers.ndim not in (2, 3) or observers.shape[-1] != 3:
         raise ValueError("stacked_r must have shape (n_points, 3) or (n_points, n_steps, 3).")
     if sun.ndim != 2 or sun.shape[-1] != 3:
@@ -614,16 +914,51 @@ def compute_shadow_f(stacked_r, r_sun_day, toa_grid: Grid,
         observers = observers[:, None, :]
     if observers.shape[1] not in (1, len(sun)):
         raise ValueError("The observer time axis must have length 1 or n_steps.")
-    if not np.all(np.isfinite(observers)) or not np.all(np.isfinite(sun)):
-        raise ValueError("Observer and Sun positions must be finite.")
+    # flat slices copy only a bounded buffer, even for strided histories.
+    # Validate before allocating the result, including empty-output cases.
+    for positions in (observers, sun):
+        for start in range(0, positions.size, 3 * max_pairs):
+            if not np.all(np.isfinite(np.asarray(
+                    positions.flat[start:start + 3 * max_pairs], dtype=float))):
+                raise ValueError("Observer and Sun positions must be finite.")
     p = RE + toa_grid.alt_km
     flattening = toa_grid.flattening
     if not np.isfinite(p) or p <= 0 or not np.isfinite(flattening) or not 0 <= flattening < 1:
         raise ValueError("The occulting radius must be positive and 0 <= flattening < 1.")
     q = p * (1 - flattening)
     axes = np.array([p, p, q])
-    if np.any(np.sum((sun / axes)**2, axis=-1) <= 1):
-        raise ValueError("The Sun centre must be outside the occulting ellipsoid.")
+    for start in range(0, len(sun), max_pairs):
+        if np.any(np.sum((np.asarray(sun[start:start + max_pairs], dtype=float)
+                          / axes)**2, axis=-1) <= 1):
+            raise ValueError("The Sun centre must be outside the occulting ellipsoid.")
+
+    n_points, n_steps = len(observers), len(sun)
+    if n_points == 0 or n_steps == 0:
+        return np.empty((n_points, n_steps), dtype=float)
+    # The solar-flux caller already supplies bounded blocks. Evaluate such
+    # inputs directly, avoiding another result allocation and block copy.
+    if n_points * n_steps <= max_pairs:
+        return _compute_shadow_f_chunk(observers, sun, p, q,
+                                       penumbra_method=penumbra_method)
+    shadow_f = np.empty((n_points, n_steps), dtype=float)
+    time_chunk_size = min(n_steps, max_pairs)
+    observer_chunk_size = max(1, max_pairs // time_chunk_size)
+    for point_start in range(0, n_points, observer_chunk_size):
+        point_slice = slice(point_start, point_start + observer_chunk_size)
+        for time_start in range(0, n_steps, time_chunk_size):
+            time_slice = slice(time_start, time_start + time_chunk_size)
+            observer_chunk = (observers[point_slice] if observers.shape[1] == 1
+                              else observers[point_slice, time_slice])
+            shadow_f[point_slice, time_slice] = _compute_shadow_f_chunk(
+                observer_chunk, sun[time_slice], p, q, penumbra_method=penumbra_method)
+    return shadow_f
+
+
+def _compute_shadow_f_chunk(observers, sun, p, q, *, penumbra_method):
+    """Evaluate the shadow geometry for a bounded observer/time block."""
+    observers = np.asarray(observers, dtype=float)
+    sun = np.asarray(sun, dtype=float)
+    smooth_shadow = penumbra_method is not None
 
     # Broadcasting avoids copying a static grid for every time step.
     observers, sun = np.broadcast_arrays(observers, sun[None, :, :])
@@ -759,7 +1094,10 @@ def compute_adhya_intersection(a, b, p, q):
 
 
 def compute_F_hist_at_sat_r_hist(EEI_truth_name, sat_r_hist, sat_jd_hist, toa_grid: Grid,
-                                 erp_wl_split=True, store_dF=False):
+                                 erp_wl_split=True, store_dF=False, *, map_provider:DailyAEMapProvider=None):
+    
+    if len(np.shape(sat_r_hist))==2: # single satellite case
+        sat_r_hist = sat_r_hist[None,...]
 
     rad_config = rad_settings.radiation_settings_from_EEI_truth_name(EEI_truth_name)
 
@@ -767,86 +1105,131 @@ def compute_F_hist_at_sat_r_hist(EEI_truth_name, sat_r_hist, sat_jd_hist, toa_gr
     TSI_1AU_day = rad_settings.get_TSI_1AU(sat_jd_hist, rad_config['TSI_source'])
     t1 = time.time()
     srp_F_hist = get_solar_incoming_day_hist(r_sun_hist, TSI_1AU_day, 
-                                             sat_r_hist[None,...], grid_bool=False,
+                                             sat_r_hist, grid_bool=False,
                                              toa_grid=toa_grid,
                                              penumbra_method=rad_config.get('penumbra_method'))
     t2 = time.time()    
     print(f"Time SRP 1: {t2-t1}")
     if erp_wl_split:
         erp_F_LW_hist, erp_F_SW_hist = compute_earth_F_at_altitude(sat_jd_hist, rad_config, 
-                                                sat_r_hist[None,...], toa_grid,
-                                                store_dF=store_dF, wavelength="split")
+                                                sat_r_hist, toa_grid,
+                                                store_dF=store_dF, wavelength="split",
+                                                map_provider=map_provider)
+        
         t3 = time.time()
         print(f"Time ERP 1: {t3-t2}")
         return erp_F_LW_hist, erp_F_SW_hist, srp_F_hist
     
     else:
         erp_F_hist = compute_earth_F_at_altitude(sat_jd_hist, rad_config, 
-                                                sat_r_hist[None,...], toa_grid,
-                                                store_dF=store_dF, wavelength="sum")
+                                                sat_r_hist, toa_grid,
+                                                store_dF=store_dF, wavelength="sum",
+                                                map_provider=map_provider)
         t3 = time.time()
         print(f"Time ERP 1: {t3-t2}")
         return erp_F_hist, srp_F_hist
 
-    # TODO: accelerations for plated satellites, which are not just a constant times F
 
 
-def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hist, sat_jd_hist, toa_grid: Grid,
-                                 sat_R_body2ECEF_hist):
+def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hists, sat_jd_hist, toa_grid: Grid,
+                                 sat_R_body2ECEF_hists=None, *, map_provider:DailyAEMapProvider=None):
 
-    # this function computes accelerations on a plated satellite due to ERP and SRP. 
-    # first step is to call compute_F_hist_at_sat_r_hist to get the beam of fluxes (Earth element fluxes from all Earth surface nodes)
+    if sat_dict.get('cannonball'):
+        if sat_dict['coeff_wl_split']:
+            erp_F_LW_hist, erp_F_SW_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
+                                                                sat_r_hists, 
+                                                                sat_jd_hist, 
+                                                                toa_grid,
+                                                                store_dF=False,
+                                                                map_provider=map_provider)
+                
+            k_SW = sat_dict['ca_SW'] + sat_dict['cs_SW'] + 13*sat_dict['cd_SW']/9
+            F_to_a_SW = sat_dict['area'] / sat_dict['mass'] * k_SW / LIGHT_SPEED
 
-    n_steps = len(sat_r_hist)
-    assert(len(sat_jd_hist) == len(sat_R_body2ECEF_hist) == n_steps)
-    # sat_R_body2ECEF_hist = Rotation.random(n_steps).as_matrix()
+            k_LW = sat_dict['ca_LW'] + sat_dict['cs_LW'] + 13*sat_dict['cd_LW']/9
+            F_to_a_LW = sat_dict['area'] / sat_dict['mass'] * k_LW / LIGHT_SPEED
 
-    # all nets below still to be scaled by 1/(mc) to get acc. in ms-2
+            a_erp = erp_F_LW_hist * F_to_a_LW + erp_F_SW_hist * F_to_a_SW
+            a_srp = srp_F_hist * F_to_a_SW
 
-    # if different SW vs LW coefficients:
-    if sat_dict['coeff_wl_split']:
-        erp_dF_LW_hist, erp_dF_SW_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
-                                                            sat_r_hist, 
-                                                            sat_jd_hist, 
-                                                            toa_grid,
-                                                            store_dF=True)
-        # erp_dF_LW_hist is shaped (1, np_toa, nt, 3)
-        # erp_dF_SW_hist is shaped (1, np_toa, nt, 3)
-        # srp_dF_hist is shaped (1, nt, 3)
+        else: # if same LW+SW coeffs:
+            erp_F_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
+                                                                  sat_r_hists, 
+                                                                  sat_jd_hist, 
+                                                                  toa_grid,
+                                                                  store_dF=False,
+                                                                  erp_wl_split=False,
+                                                                  map_provider=map_provider)
+
+            k_SW = sat_dict['ca_SW'] + sat_dict['cs_SW'] + 13*sat_dict['cd_SW']/9
+            F_to_a_SW = sat_dict['area'] / sat_dict['mass'] * k_SW / LIGHT_SPEED
+
+            a_erp = erp_F_hist * F_to_a_SW
+            a_srp = srp_F_hist * F_to_a_SW
+    
+    else:
+        # sat_R_body2ECEF_hist = Rotation.random(n_steps).as_matrix()
+        assert(sat_R_body2ECEF_hists is not None)
+                
+        # this function computes accelerations on a plated satellite due to ERP and SRP. 
+        # first step is to call compute_F_hist_at_sat_r_hist to get the beam of fluxes (Earth element fluxes from all Earth surface nodes)
+
+        if len(np.shape(sat_r_hists))==2: # single satellite
+            n_steps = len(sat_r_hists)
+            assert(len(sat_jd_hist) == len(sat_R_body2ECEF_hists) == n_steps)
+
+        elif len(np.shape(sat_r_hists))==3: # multiple satellites, first axis is satellites
+            n_steps = np.shape(sat_r_hists)[1]
+        
 
         # all nets below still to be scaled by 1/(mc) to get acc. in ms-2
-        net_erp_LW = _integrate_net_vec_codex(erp_dF_LW_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
-                                            sat_dict["plate_ca_LW"], sat_dict["plate_cd_LW"], sat_dict["plate_cs_LW"], 
-                                            sat_R_body2ECEF_hist)
-        
-        net_erp_SW = _integrate_net_vec_codex(erp_dF_SW_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
-                                            sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
-                                            sat_R_body2ECEF_hist)
-        net_erp = net_erp_LW + net_erp_SW
 
-    else: # if same LW+SW coeffs:
-        erp_dF_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
-                                                           sat_r_hist, 
-                                                           sat_jd_hist, 
-                                                           toa_grid,
-                                                           store_dF=True,
-                                                           erp_wl_split=False)
+        # if different SW vs LW coefficients:
+        if sat_dict['coeff_wl_split']:
+            erp_dF_LW_hist, erp_dF_SW_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
+                                                                sat_r_hists, 
+                                                                sat_jd_hist, 
+                                                                toa_grid,
+                                                                store_dF=True,
+                                                                map_provider=map_provider)
+            # erp_dF_LW_hist is shaped (1, np_toa, nt, 3)
+            # erp_dF_SW_hist is shaped (1, np_toa, nt, 3)
+            # srp_dF_hist is shaped (1, nt, 3)
+
+            # all nets below still to be scaled by 1/(mc) to get acc. in ms-2
+            net_erp_LW = _integrate_net_vec_codex(erp_dF_LW_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
+                                                sat_dict["plate_ca_LW"], sat_dict["plate_cd_LW"], sat_dict["plate_cs_LW"], 
+                                                sat_R_body2ECEF_hists)
+            
+            net_erp_SW = _integrate_net_vec_codex(erp_dF_SW_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
+                                                sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
+                                                sat_R_body2ECEF_hists)
+            net_erp = net_erp_LW + net_erp_SW
+
+        else: # if same LW+SW coeffs:
+            erp_dF_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
+                                                            sat_r_hists, 
+                                                            sat_jd_hist, 
+                                                            toa_grid,
+                                                            store_dF=True,
+                                                            erp_wl_split=False,
+                                                            map_provider=map_provider)
+            t1 = time.time()
+            net_erp = _integrate_net_vec_codex(erp_dF_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
+                                        sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
+                                        sat_R_body2ECEF_hists)
+            t2 = time.time()
+            print(f"Time ERP 2: {t2-t1}")
+
         t1 = time.time()
-        net_erp = _integrate_net_vec_codex(erp_dF_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
-                                    sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
-                                    sat_R_body2ECEF_hist)
+        net_srp = _integrate_net_vec_codex(srp_F_hist[:,None,:,:], sat_dict["plate_normals"], sat_dict["plate_areas"], 
+                                        sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
+                                        sat_R_body2ECEF_hists)
         t2 = time.time()
-        print(f"Time ERP 2: {t2-t1}")
+        print(f"Time SRP 2: {t2-t1}")
 
-    t1 = time.time()
-    net_srp = _integrate_net_vec_codex(srp_F_hist[:,None,:,:], sat_dict["plate_normals"], sat_dict["plate_areas"], 
-                                       sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
-                                       sat_R_body2ECEF_hist)
-    t2 = time.time()
-    print(f"Time SRP 2: {t2-t1}")
-
-    factor = 1 / (sat_dict['mass'] * LIGHT_SPEED)
-    a_erp, a_srp = factor * net_erp, factor * net_srp
+        factor = 1 / (sat_dict['mass'] * LIGHT_SPEED)
+        a_erp, a_srp = factor * net_erp, factor * net_srp
 
     return a_erp, a_srp
 
@@ -889,7 +1272,7 @@ def _integrate_net_vec_codex(
     sat_plate_ca,
     sat_plate_cd,
     sat_plate_cs,
-    sat_R_body2ECEF_hist,
+    sat_R_body2ECEF_hists,
 ):
     """Return c * force in ECEF, shaped (n_observers, n_times, 3).
 
@@ -897,8 +1280,9 @@ def _integrate_net_vec_codex(
       dF_beam_hist: (n_observers, n_sources, n_times, 3), in W/m^2.
       sat_plate_normals: (n_plates, 3), outward unit body-frame normals.
       areas and optical coefficients: (n_plates,), areas in m^2.
-      sat_R_body2ECEF_hist: (n_times, 3, 3), orthonormal rotations
+      sat_R_body2ECEF_hists: (n_times, 3, 3), orthonormal rotations
           shared across the observer axis.
+          OR (n_observers, n_times, 3, 3), unshared
 
     Assumes finite inputs and no mutual shadowing between plates.
     Divide by mass_kg * c_m_per_s to obtain acceleration in m/s^2.
@@ -909,9 +1293,13 @@ def _integrate_net_vec_codex(
     ca = np.asarray(sat_plate_ca, dtype=np.float64)
     cd = np.asarray(sat_plate_cd, dtype=np.float64)
     cs = np.asarray(sat_plate_cs, dtype=np.float64)
-    R = np.asarray(sat_R_body2ECEF_hist, dtype=np.float64)
+    R = np.asarray(sat_R_body2ECEF_hists, dtype=np.float64)
 
     n_observers, n_sources, n_times, _ = F.shape
+
+    # Also accepts the existing shared-attitude input (n_times, 3, 3).
+    R = np.broadcast_to(R, (n_observers, n_times, 3, 3))
+
     out = np.zeros((n_observers * n_times, 3), dtype=np.float64)
 
     if A.size == 0:
@@ -929,7 +1317,8 @@ def _integrate_net_vec_codex(
     magnitude = np.sqrt(np.einsum("ki,ki->k", beam, beam))
 
     # R.T @ beam: transform photon propagation directions to body frame.
-    direction = np.einsum("ki,kij->kj", beam, R[time])
+    #direction = np.einsum("ki,kij->kj", beam, R[time])
+    direction = np.einsum("ki,kij->kj", beam, R[observer, time])
     direction /= magnitude[:, None]
     del beam
 
@@ -963,10 +1352,14 @@ def _integrate_net_vec_codex(
     )
 
     # Rotate only the final sums back to ECEF.
+    # return np.einsum(
+    #     "tij,btj->bti", R, out.reshape(n_observers, n_times, 3)
+    # )
     return np.einsum(
-        "tij,btj->bti", R, out.reshape(n_observers, n_times, 3)
+        "btij,btj->bti",
+        R,
+        out.reshape(n_observers, n_times, 3),
     )
-
 
 
 
@@ -1211,7 +1604,7 @@ def load_sh_maps(datestr, rad_config_dict):
     return a_sh_map, e_sh_map
 
 
-def get_smooth_daily_ae_hist(out_jd_array, rad_config, grid:Grid=None):
+def get_smooth_daily_ae_hist(out_jd_array, rad_config, grid:Grid=None, *, map_provider:DailyAEMapProvider=None):
 
     method=rad_config["time_interp"]
     if method=="map_interp":
@@ -1230,10 +1623,22 @@ def get_smooth_daily_ae_hist(out_jd_array, rad_config, grid:Grid=None):
 
     for i, jd in enumerate(jd_interp):
         datestr = jd_to_mmddyyyy(jd)
-        a, e = load_sh_maps(datestr, rad_config)
-        if method=="map_interp":
-            a = expand_sh(a, full_lon, full_lat, rad_config['sh_normalization'])
-            e = expand_sh(e, full_lon, full_lat, rad_config['sh_normalization'])
+        # a, e = load_sh_maps(datestr, rad_config)
+        # if method=="map_interp":
+        #     a = expand_sh(a, full_lon, full_lat, rad_config['sh_normalization'])
+        #     e = expand_sh(e, full_lon, full_lat, rad_config['sh_normalization'])
+
+        if method == "map_interp":
+            if map_provider is not None:
+                a, e = map_provider.get_maps(datestr)
+            else:
+                a, e = load_sh_maps(datestr, rad_config)
+                a = expand_sh(a, full_lon, full_lat, rad_config['sh_normalization'])
+                e = expand_sh(e, full_lon, full_lat, rad_config['sh_normalization'])
+
+        else:
+            a, e = load_sh_maps(datestr, rad_config)
+        
         all_a[i] = a
         all_e[i] = e
 
@@ -1410,7 +1815,9 @@ def get_window_avg_maps(EEI_truth_name, jd_windows, map_name, grid: Grid):
     return avg_map_array
 
 
-def get_toa_grid_from_rad_config(rad_config: dict, quadrature_order=None):
+def get_toa_grid_from_rad_config(rad_config: dict, quadrature_order=None, deg_bin_size=None, glq_order=None,
+                                 default_womersley=False):
+    assert sum(x is not None for x in (quadrature_order, deg_bin_size, glq_order)) <= 1, "At most one input may be non-None"
 
     if quadrature_order is None:
         if rad_config['Nmax']==2:
@@ -1436,9 +1843,18 @@ def get_toa_grid_from_rad_config(rad_config: dict, quadrature_order=None):
         R_wgs84 = constants.earth_radius(model='WGS84')
         flattening = 1 - ((R_wgs84 * (1-f_wgs84) + alt_km) / (R_wgs84 + alt_km))
 
-    return QuadratureGrid(alt_km=alt_km, order=quadrature_order, flattening=flattening)
+    if (deg_bin_size is None) and (glq_order is None):
+        return QuadratureGrid(alt_km=alt_km, order=quadrature_order, flattening=flattening, 
+                              default_womersley=default_womersley)
     
+    elif deg_bin_size is not None:
+        return RegularLatLonGrid(alt_km=alt_km, 
+                                 n_lat=int(np.round(180/deg_bin_size)), 
+                                 n_lon=int(np.round(360/deg_bin_size)),
+                                 flattening=flattening)
 
+    elif glq_order is not None:
+        return RegularLatLonGrid(alt_km=alt_km, lmax=glq_order, quad_type='GLQ', flattening=flattening)
 
 
 ##############################################################################################
@@ -1515,6 +1931,12 @@ def save_toa_files(toa_LW_day_hist, toa_SW_day_hist, net_toa_day_hist, net_toa_d
         toa_surf_avg_day_hist = grid.compute_surf_integral(net_toa_day_hist, average=True)
         np.save(all_file_names['daily_hist_net_toa_surf_avg'], toa_surf_avg_day_hist)
 
+    if not(file_existences['daily_hist_earth_toa_surf_avg']):
+        print("Saving daily_hist_earth_toa_surf_avg file...")
+        earth_surf_avg_day_hist = grid.compute_surf_integral(toa_LW_day_hist + toa_SW_day_hist, average=True)
+        np.save(all_file_names['daily_hist_earth_toa_surf_avg'], earth_surf_avg_day_hist)
+
+
 """
 "altitude": ['daily_hist_net_F_{alt_km}km', 'daily_hist_net_F_{alt_km}km_SFF_accurate',
              'daily_avg_net_F_{alt_km}km', 'daily_avg_net_F_{alt_km}km_SFF_accurate',
@@ -1548,3 +1970,51 @@ def save_altitude_files(daily_hist_net_F_altitude, daily_hist_net_F_altitude_SFF
             daily_avg_net_F_SFF = np.mean(daily_hist_net_F_altitude_SFF, axis=1)
             np.save(file_names[f"daily_avg_net_F_{grid.alt_km}km_SFF_accurate"], daily_avg_net_F_SFF)
         
+
+
+
+from functools import lru_cache
+import numpy as np
+
+# Uses your existing load_sh_maps() and expand_sh() helpers.
+
+class DailyAEMapProvider:
+    def __init__(self, grid: Grid, rad_config, max_days=10):
+        if max_days < 1:
+            raise ValueError("max_days must be positive")
+
+        # Copy only the settings that determine the daily maps.
+        config = {
+            "sh_mode": rad_config["sh_mode"],
+            "Nmax": rad_config["Nmax"],
+            "sh_normalization": rad_config["sh_normalization"],
+        }
+
+        # Snapshot coordinates so later grid changes cannot invalidate
+        # previously cached maps.
+        latlon = np.array(grid.stacked_grid_latlon, copy=True)
+        #latlon.setflags(write=False)
+        lat, lon = latlon.T
+
+        @lru_cache(maxsize=max_days)
+        def load_day(datestr):
+            a_sh, e_sh = load_sh_maps(datestr, config)
+
+            a = expand_sh(a_sh, lon, lat, config["sh_normalization"])
+            e = expand_sh(e_sh, lon, lat, config["sh_normalization"])
+
+            # Calls reuse these arrays, so protect against accidental edits.
+            a.setflags(write=False)
+            e.setflags(write=False)
+            return a, e
+
+        self._load_day = load_day
+
+    def get_maps(self, datestr):
+        return self._load_day(datestr)
+
+    def clear(self):
+        self._load_day.cache_clear()
+
+    def cache_info(self):
+        return self._load_day.cache_info()

@@ -275,33 +275,33 @@ class SpaceBallsSim():
         np.save(os.path.join(data_out_dir, 'jd_vec'+'.npy'), output_manager.jd_array)
         #np.savetxt(data_out_dir + 'jd_vec.csv', output_manager.jd_array)
 
-        try:
-            # Enable caching to avoid recomputing the coordinate rotations
-            # for the ScPlate normal vectors as part of the solarPressure 
-            # computation. Note that the cache system does NOT detect changes 
-            # to models, so the cache should only be selectively enabled for 
-            # a series of computations.
+        # try:
+        #     # Enable caching to avoid recomputing the coordinate rotations
+        #     # for the ScPlate normal vectors as part of the solarPressure 
+        #     # computation. Note that the cache system does NOT detect changes 
+        #     # to models, so the cache should only be selectively enabled for 
+        #     # a series of computations.
+        #     t1 = time.time()
+        #     cache = M.CacheControlBoa.read( self.force_manager.boa )
+        #     cache.push( True )
+        #     t2 = time.time()
+        #     print(f"Cache overhead time: {t2-t1}")
+
+
+        for i, pf in enumerate(self.force_manager.pressforces):
             t1 = time.time()
-            cache = M.CacheControlBoa.read( self.force_manager.boa )
-            cache.push( True )
+            acc_hist = output_manager.find_accel_hist(pf)
             t2 = time.time()
-            print(f"Cache overhead time: {t2-t1}")
+            print(f"Time to compute {self.force_manager.force_names[i]}: {t2-t1}")
+                        
+            file_name = self.force_manager.force_names[i]
+            output_manager.write_acc(acc_hist, data_out_dir, file_name)
 
-
-            for i, pf in enumerate(self.force_manager.pressforces):
-                t1 = time.time()
-                acc_hist = output_manager.find_accel_hist(pf)
-                t2 = time.time()
-                print(f"Time to compute {self.force_manager.force_names[i]}: {t2-t1}")
-                            
-                file_name = self.force_manager.force_names[i]
-                output_manager.write_acc(acc_hist, data_out_dir, file_name)
-
-                self.all_acc_hist[i] = acc_hist
-                self.all_acc_norm_hist[i] = np.linalg.norm(acc_hist, ord=2, axis=1)
-        finally:
-            # Turn off caching.
-            cache.pop()
+            self.all_acc_hist[i] = acc_hist
+            self.all_acc_norm_hist[i] = np.linalg.norm(acc_hist, ord=2, axis=1)
+        # finally:
+        #     # Turn off caching.
+        #     cache.pop()
 
         self.all_acc_hist = np.stack(self.all_acc_hist, axis=2)  # size: [nsteps, 3, nforces]
         output_manager.find_r_hist()

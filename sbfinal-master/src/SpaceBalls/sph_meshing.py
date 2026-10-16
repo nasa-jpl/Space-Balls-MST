@@ -270,18 +270,16 @@ class RegularLatLonGrid(Grid):
                 return field_array
 
         elif len(shape)==3:
+            assert(len(np.unique(shape))==3), "Edge case! which axis is the time axis?"
             if shape[1] * shape[2] == (self.n_lat * self.n_lon):
                 n_steps = shape[0] # first dim is time dim
+                return field_array.reshape((n_steps, self.n_lat*self.n_lon)).T
+            
             elif shape[0] * shape[1] == (self.n_lat * self.n_lon):
                 n_steps = shape[2] # last dim is the time dim
-
-            return field_array.reshape((self.n_lat*self.n_lon, n_steps)) # checked to give the same as for loop
+                return field_array.reshape((self.n_lat*self.n_lon, n_steps))
         
-            #out_array = np.zeros((self.n_lat*self.n_lon, n_steps))
-            #for i in range(n_steps):
-            #    out_array[:,i] = field_array[:,:,i].reshape((self.n_lat*self.n_lon))
-            #return out_array
-    
+
     def compute_lat_avg_map(self, field_aray):
         # mean works because element areas are constant at every latitude
         return np.mean(field_aray, axis=1)  
@@ -994,10 +992,11 @@ def expand_sh(sh_map, evaluation_lon_vec, evaluation_lat_vec, normalization):
     else:
         pysh = importlib.import_module('pyshtools')
     """
-    
+
     eval_coeffs = pysh.SHCoeffs.from_array(sh_map, normalization=normalization).expand(
-                                        lon=evaluation_lon_vec, lat=evaluation_lat_vec, 
-                                        backend='ducc', nthreads=10)
+                                            lon=evaluation_lon_vec, lat=evaluation_lat_vec)
+
+        
     return eval_coeffs
 
 

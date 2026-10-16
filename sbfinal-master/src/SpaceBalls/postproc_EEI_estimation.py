@@ -763,6 +763,7 @@ def meas_vs_cos_theta_s_function(cos_theta_s, cos_theta_s_lim, c, coeffs, mode, 
         if mode=="bilinear":
             m, n = coeffs[0]
             m2, n2 = coeffs[1]
+            q, q2 = 0, 0
         else:
             q, m, n = coeffs[0]
             q2, m2, n2 = coeffs[1]
@@ -826,7 +827,6 @@ def load_ideal_RIC_acc_meas(input_names, add_drag=True, jd_windows=None, meas_mo
     #elif meas_mode=="recomp_radial":
     #    rp_acc_tag_end = '_recomp_radial'
     #    erp_acc_tag_end = '_recomp_radial'
-    
     srp_acc_hist_array = get_full_output_var_hist(input_names, 'srp'+srp_acc_tag_end, jd_windows=jd_windows)
     erp_acc_hist_array = get_full_output_var_hist(input_names, 'erp'+erp_acc_tag_end, jd_windows=jd_windows)
 
@@ -835,9 +835,9 @@ def load_ideal_RIC_acc_meas(input_names, add_drag=True, jd_windows=None, meas_mo
         
         r_hist_array = get_r_hist_array(input_names, "ECEF", jd_windows)
 
+        # NOTE: F_vec_to_Fr flips the sign back from wrong to right (bug in early versions of acc. recomp.)
         srp_acc_hist_array = [np.squeeze(F_vec_to_Fr(srp[None,...], (r_hist/get_norm_across_last_dim(r_hist)[...,None])[None,...])) 
                               for srp, r_hist in zip(srp_acc_hist_array, r_hist_array)]
-        # srp_acc_hist_array = [srp[:,0] for srp in srp_acc_hist_array]
 
         erp_acc_hist_array = [np.squeeze(F_vec_to_Fr(erp[None,...], (r_hist/get_norm_across_last_dim(r_hist)[...,None])[None,...])) 
                               for erp, r_hist in zip(erp_acc_hist_array, r_hist_array)]
@@ -1232,7 +1232,7 @@ def check_EEI_consistency(input_names):
 
 def get_true_EEI_time_series(EEI_name, n_days=None, grid_name=None):
     if EEI_name=="EEI_truth_351": EEI_name = "EEI_truth_35" # patch
-    if EEI_name=="EEI_truth_41": EEI_name = "EEI_truth_4"
+    if EEI_name=="EEI_truth_31" or EEI_name=="EEI_truth_4" or EEI_name=="EEI_truth_41" or EEI_name=="EEI_truth_42": EEI_name = "EEI_truth_3"
     
     EEI_settings = radiation_settings_from_EEI_truth_name(EEI_name)
     if grid_name is None:

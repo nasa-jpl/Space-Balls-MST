@@ -314,6 +314,11 @@ class SpaceBallsSim():
         
         file_name = 'xyz_sun_frame'
         output_manager.save_cartesian_hist(output_manager.r_sunframe_hist, data_out_dir, file_name)
+
+        output_manager.find_kep_h_hist()
+        file_name = 'hxhyhz_ecef'
+        output_manager.save_cartesian_hist(output_manager.h_ecef_hist, data_out_dir, file_name)
+        
         
         all_rot_mat = output_manager.get_all_ECEF2RIC_rotations()
         np.save(os.path.join(data_out_dir, 'ecef2ric_hist'), np.array(all_rot_mat))
@@ -520,10 +525,50 @@ class OutputManager():
                                 M.Cartesian.z(oscStateSunFrame).convert('km')]
             
         self.r_ecef_hist = np.array(r_ecef_hist)
+        print(f"max - min r_norm: {np.min(np.linalg.norm(self.r_ecef_hist, axis=1)) - np.max(np.linalg.norm(self.r_ecef_hist, axis=1))}")
         self.v_ecef_hist = np.array(v_ecef_hist)
         self.r_sunframe_hist = np.array(r_sunframe_hist)
 
 
+    def find_kep_h_hist(self):
+        """Compute inertial Keplerian elements and Earth-fixed angular momentum."""
+        nt = len(self.pointtimes)
+
+        # Columns: a [km], e [-], i, RAAN, omega, nu [deg].
+        self.kep_hist = np.empty((nt, 6))
+
+        # Specific angular momentum expressed in Earth-fixed axes [km^2/s].
+        self.h_ecef_hist = np.empty((nt, 3))
+
+        query = M.TrajQuery(
+            self.boa, self.sc.name, 'Earth', 'EME2000'
+        )
+        coord = M.CoordSetBoa.read(self.boa)
+
+        for i, time in enumerate(self.pointtimes):
+            state_I = query.state(time, 'EME2000')
+
+            self.kep_hist[i] = [
+                M.Conic.semiMajorAxis(state_I).convert('km'),
+                float(M.Conic.eccentricity(state_I)),
+                M.Conic.inclination(state_I).convert('deg'),
+                M.Conic.longitudeOfNode(state_I).convert('deg'),
+                M.Conic.argumentOfPeriapsis(state_I).convert('deg'),
+                M.Conic.trueAnomaly(state_I).convert('deg'),
+            ]
+
+            # Compute h from inertial position and velocity.
+            h_I = np.asarray(
+                M.Conic.angularMomentumVec(state_I).toArray()
+            )
+
+            # Express that vector in Earth-fixed axes.
+            R_I_to_F = np.asarray(
+                coord.rotation(
+                    time, 'IAU Earth Fixed', 'EME2000'
+                ).m().toArray()
+            )
+            self.h_ecef_hist[i] = R_I_to_F @ h_I
 
     def find_lonlat_hist(self): # TODO: change name or separate
 
@@ -710,9 +755,10 @@ class ForceManager():
         self.force_names = []
 
         self._load_gravity(self.sc.name)
-        self._load_drag()   # WE'RE HERE 
-        self._load_srp()
-        self._load_albedo()
+        if self.settings_dict['settings_num']!=100: # TODO: flexibility with file input instead of database
+            self._load_drag()   # WE'RE HERE 
+            self._load_srp()
+            self._load_albedo()
         
         # if self.settings_dict[ 'aero_force' ]:
         #     self._load_drag()
@@ -737,14 +783,16 @@ class ForceManager():
         #                                 self.GravModel.jCof[:(Nmax+1)], Nmax, self.GravModel.cCof, self.GravModel.sCof, self.GravModel.normalized)
         Earth_SH = M.SphHarmonics(self.boa, "Earth", "Earth", M.CoordName.IauEarthFixed, self.GravModel.meanr,
                                   self.GravModel.normalized, self.GravModel.jCof, self.GravModel.cCof, self.GravModel.sCof, []) # new constructor TODO: Nmax
-        Earth_SH.setDegreeCS(Nmax)
-        Earth_SH.setDegreeJ(Nmax)
+        monte_degree = -1 if Nmax == 0 else Nmax
+        Earth_SH.setDegreeCS(monte_degree)
+        Earth_SH.setDegreeJ(monte_degree)
         
         Earth_SOI = constants.earth_SOI(monte_units=True)
         grav.insert(M.GravityNode("", "", "Earth", Earth_SOI, M.GravityNode.SPHERICAL))
-        
-        for body in (self.settings_dict['third_bodies']).split('|'):
-            grav.insert( M.GravityNode("", "", body, 0*units.km))    #, GravityNode.NEWTONIAN) )
+
+        if self.settings_dict['third_bodies']:
+            for body in (self.settings_dict['third_bodies']).split('|'):
+                grav.insert( M.GravityNode("", "", body, 0*units.km))    #, GravityNode.NEWTONIAN) )
             #self.force_names.append(body) # TODO: third bodies (?)
 
         self.pressforces.append(grav)

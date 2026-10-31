@@ -482,6 +482,31 @@ def make_dict_hash_key(input_dict):
     hash_str = hashlib.blake2b(key_string.encode(), digest_size=8).hexdigest()
     return hash_str
 
+
+def make_dict_hash_key_codex(input_dict):
+    filtered = {
+        key: value
+        for key, value in input_dict.items()
+        if (not isinstance(value, dict) and value is not None)
+        or (
+            isinstance(value, dict)
+            and value
+            and not all(v is None for v in value.values())
+        )
+    }
+
+    def convert(value):
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        raise TypeError(f"Cannot serialize {type(value).__name__}")
+
+    key_string = json.dumps(filtered, sort_keys=True, default=convert)
+    return hashlib.blake2b(
+        key_string.encode("utf-8"), digest_size=8
+    ).hexdigest()
+
 def make_list_str_key(input_list, sep='|'):
     return sep.join(sorted(input_list))
 

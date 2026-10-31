@@ -70,24 +70,33 @@ def initialize_db():
               FOREIGN KEY(integration_settings) REFERENCES  integration_settings_table(settings_num)
               );""")    # uniqueness is enforced by the hash of the primary key!
 
-
+    c.execute("""CREATE TABLE IF NOT EXISTS sc_materials_table (
+                material_and_source TEXT PRIMARY KEY,
+                ca_SW NUMERIC,
+                cd_SW NUMERIC,
+                cs_SW NUMERIC,
+                ca_LW NUMERIC,
+                cd_LW NUMERIC,
+                cs_LW NUMERIC
+                )""")
 
 initialize_db()
 
-def insert_sb(orbit_name, sc_name, force_settings_num, integration_settings_num, delta_t_out):
+def insert_sb(orbit_name, sc_name, force_settings_num, integration_settings_num, delta_t_out, spin_axis=None):
     sb_dict = {
         'orbit_name': orbit_name,
         'sc_name': sc_name,
         'force_settings': force_settings_num,
         'integration_settings': integration_settings_num,
-        'delta_t_out': delta_t_out
+        'delta_t_out': delta_t_out,
+        'spin_axis': spin_axis
     }
     sb_hash = make_dict_hash_key(sb_dict)
     sb_dict['hash'] = sb_hash
     with conn:
         c.execute(#"""INSERT INTO sb_table (sb_hash, orbit_name, sc_name, force_settings, integration_settings, delta_t_out)
-                  """INSERT OR IGNORE INTO sb_table (sb_hash, orbit_name, sc_name, force_settings, integration_settings, delta_t_out)
-                  VALUES (:hash, :orbit_name, :sc_name, :force_settings, :integration_settings, :delta_t_out);
+                  """INSERT OR IGNORE INTO sb_table (sb_hash, orbit_name, sc_name, force_settings, integration_settings, delta_t_out, spin_axis)
+                  VALUES (:hash, :orbit_name, :sc_name, :force_settings, :integration_settings, :delta_t_out, :spin_axis);
                   """, sb_dict )
     return sb_hash
         
@@ -137,8 +146,10 @@ def insert_orbit(sc_tag, kep_0_dict, delta_jd_0=0):
 def insert_sc_entry(sc_name, sc_input_dict):
     sc_input_dict['name'] = sc_name
     with conn:
-        c.execute("""INSERT INTO sc_table (sc_name, mass, area, shape, CD, diffReflect, diffDegrade, specReflect, specDegrade)
-                VALUES (:name, :mass, :area, :shape, :cd, :diffReflect, :diffDegrade, :specReflect, :specDegrade)
+        c.execute("""INSERT INTO sc_table (sc_name, mass, area, shape, CD, diffReflect, diffDegrade, specReflect, specDegrade,
+                                            accurate_coeff_source, solar_panel_frac, solar_panel_distr, materials, wavelength_split)
+                VALUES (:name, :mass, :area, :shape, :cd, :diffReflect, :diffDegrade, :specReflect, :specDegrade,
+                        :accurate_coeff_source, :solar_panel_frac, :solar_panel_distr, :materials, :wavelength_split)
                     ON CONFLICT (mass, area, shape, CD, diffReflect, diffDegrade, specReflect, specDegrade) DO NOTHING""", 
                     sc_input_dict)
 
@@ -163,12 +174,24 @@ def fetch_one_as_dict(cur, table, key_name, row_id):
     return dict(zip(cols, row))
 
 
+def get_sc_coeffs(material, source):
+    """Return the six SW/LW coefficients for ``material_source``, or None if absent."""
+    coeffs = fetch_one_as_dict(
+        conn.cursor(), "sc_materials_table", "material_and_source",
+        f"{material}_{source}"
+    )
+    if coeffs is None:
+        return None
+    coeffs.pop("material_and_source")
+    return coeffs
+
+
 def get_dicts(main_id):
     cur = conn.cursor()
 
     # 1. Get foreign keys from main table
     cur.execute("""
-        SELECT orbit_name, sc_name, force_settings, integration_settings, delta_t_out
+        SELECT orbit_name, sc_name, force_settings, integration_settings, delta_t_out, spin_axis, spin_f
         FROM sb_table
         WHERE sb_hash = ?
     """, (main_id,))
@@ -177,7 +200,7 @@ def get_dicts(main_id):
     if row is None:
         return None
 
-    orbit_name, sc_name, force_settings, integration_settings, delta_t_out = row
+    orbit_name, sc_name, force_settings, integration_settings, delta_t_out, spin_axis, spin_f = row
 
     result = {}
 
@@ -187,6 +210,8 @@ def get_dicts(main_id):
     result["force_settings"] = fetch_one_as_dict(cur, "force_settings_table", "settings_num", force_settings)
     result["integration_settings"] = fetch_one_as_dict(cur, "integration_settings_table", "settings_num", integration_settings)
     result["delta_t_out"] = delta_t_out
+    result["spin_axis"] = spin_axis
+    result["spin_f"] = spin_f
 
 
     return result

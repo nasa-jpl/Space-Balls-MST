@@ -513,7 +513,7 @@ def compute_earth_F_at_altitude(jd_array, rad_config: dict, stacked_r, toa_grid:
     if ADM_model is None: nt = n_steps_r 
     else: nt = n_steps  # nt is the most constraining one to build the arrays after this
 
-    max_ram_GB = 9
+    max_ram_GB = 37
     max_np = 8e9 * max_ram_GB / (64 * toa_grid.n_points * nt * 3)
     n_chunks = np.max([1, int(np.floor(n_p / max_np))])
     
@@ -1134,7 +1134,9 @@ def compute_F_hist_at_sat_r_hist(EEI_truth_name, sat_r_hist, sat_jd_hist, toa_gr
 def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hists, sat_jd_hist, toa_grid: Grid,
                                  sat_R_body2ECEF_hists=None, *, map_provider:DailyAEMapProvider=None):
 
-    if sat_dict.get('cannonball'):
+
+    if isinstance(sat_dict, dict) and sat_dict.get('cannonball', False):
+        # TODO: proper management of several different cannonballs
         if sat_dict['coeff_wl_split']:
             erp_F_LW_hist, erp_F_SW_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
                                                                 sat_r_hists, 
@@ -1170,6 +1172,34 @@ def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hists, sat_jd_h
     else:
         # sat_R_body2ECEF_hist = Rotation.random(n_steps).as_matrix()
         assert(sat_R_body2ECEF_hists is not None)
+
+        if isinstance(sat_dict, dict):
+            sat_normals = sat_dict["plate_normals"]
+            sat_areas = sat_dict["plate_areas"]           
+            sat_ca_SW = sat_dict["plate_ca_SW"]
+            sat_cd_SW = sat_dict["plate_cd_SW"]
+            sat_cs_SW = sat_dict["plate_cs_SW"]
+            if sat_dict['coeff_wl_split']:
+                sat_ca_LW = sat_dict["plate_ca_LW"]
+                sat_cd_LW = sat_dict["plate_cd_LW"]
+                sat_cs_LW = sat_dict["plate_cs_LW"]
+                coeff_wl_split_bool = True
+            else:
+                coeff_wl_split_bool = False
+            sat_mass = sat_dict['mass']
+
+        elif isinstance(sat_dict, list):
+            sat_normals = [sat_dict_i["plate_normals"] for sat_dict_i in sat_dict] 
+            sat_areas = [sat_dict_i["plate_areas"] for sat_dict_i in sat_dict]
+            sat_ca_SW = [sat_dict_i["plate_ca_SW"] for sat_dict_i in sat_dict]
+            sat_cd_SW = [sat_dict_i["plate_cd_SW"] for sat_dict_i in sat_dict] 
+            sat_cs_SW = [sat_dict_i["plate_cs_SW"] for sat_dict_i in sat_dict] 
+            #if sat_dict['coeff_wl_split']:
+            sat_ca_LW = [sat_dict_i["plate_ca_LW"] if sat_dict_i['coeff_wl_split'] else sat_dict_i["plate_ca_SW"] for sat_dict_i in sat_dict]
+            sat_cd_LW = [sat_dict_i["plate_cd_LW"] if sat_dict_i['coeff_wl_split'] else sat_dict_i["plate_cd_SW"] for sat_dict_i in sat_dict] 
+            sat_cs_LW = [sat_dict_i["plate_cs_LW"] if sat_dict_i['coeff_wl_split'] else sat_dict_i["plate_cs_SW"] for sat_dict_i in sat_dict] 
+            coeff_wl_split_bool = np.any([sat_dict_i['coeff_wl_split'] for sat_dict_i in sat_dict])
+            sat_mass = np.array([sat_dict_i['mass'] for sat_dict_i in sat_dict])
                 
         # this function computes accelerations on a plated satellite due to ERP and SRP. 
         # first step is to call compute_F_hist_at_sat_r_hist to get the beam of fluxes (Earth element fluxes from all Earth surface nodes)
@@ -1185,7 +1215,7 @@ def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hists, sat_jd_h
         # all nets below still to be scaled by 1/(mc) to get acc. in ms-2
 
         # if different SW vs LW coefficients:
-        if sat_dict['coeff_wl_split']:
+        if coeff_wl_split_bool:
             erp_dF_LW_hist, erp_dF_SW_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
                                                                 sat_r_hists, 
                                                                 sat_jd_hist, 
@@ -1197,16 +1227,15 @@ def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hists, sat_jd_h
             # srp_dF_hist is shaped (1, nt, 3)
 
             # all nets below still to be scaled by 1/(mc) to get acc. in ms-2
-            net_erp_LW = _integrate_net_vec_codex(erp_dF_LW_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
-                                                sat_dict["plate_ca_LW"], sat_dict["plate_cd_LW"], sat_dict["plate_cs_LW"], 
-                                                sat_R_body2ECEF_hists)
+            net_erp_LW = _integrate_net_vec_codex(erp_dF_LW_hist, sat_normals, sat_areas, 
+                                                sat_ca_LW, sat_cd_LW, sat_cs_LW, sat_R_body2ECEF_hists)
             
-            net_erp_SW = _integrate_net_vec_codex(erp_dF_SW_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
-                                                sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
-                                                sat_R_body2ECEF_hists)
+            net_erp_SW = _integrate_net_vec_codex(erp_dF_SW_hist, sat_normals, sat_areas, 
+                                                sat_ca_SW, sat_cd_SW, sat_cs_SW, sat_R_body2ECEF_hists)
             net_erp = net_erp_LW + net_erp_SW
 
         else: # if same LW+SW coeffs:
+            
             erp_dF_hist, srp_F_hist = compute_F_hist_at_sat_r_hist(EEI_truth_name,
                                                             sat_r_hists, 
                                                             sat_jd_hist, 
@@ -1215,20 +1244,18 @@ def compute_a_hist_at_sat_r_hist(EEI_truth_name, sat_dict, sat_r_hists, sat_jd_h
                                                             erp_wl_split=False,
                                                             map_provider=map_provider)
             t1 = time.time()
-            net_erp = _integrate_net_vec_codex(erp_dF_hist, sat_dict["plate_normals"], sat_dict["plate_areas"], 
-                                        sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
-                                        sat_R_body2ECEF_hists)
+            net_erp = _integrate_net_vec_codex(erp_dF_hist, sat_normals, sat_areas, 
+                                                sat_ca_SW, sat_cd_SW, sat_cs_SW, sat_R_body2ECEF_hists)
             t2 = time.time()
             print(f"Time ERP 2: {t2-t1}")
 
         t1 = time.time()
-        net_srp = _integrate_net_vec_codex(srp_F_hist[:,None,:,:], sat_dict["plate_normals"], sat_dict["plate_areas"], 
-                                        sat_dict["plate_ca_SW"], sat_dict["plate_cd_SW"], sat_dict["plate_cs_SW"],
-                                        sat_R_body2ECEF_hists)
+        net_srp = _integrate_net_vec_codex(srp_F_hist[:,None,:,:], sat_normals, sat_areas, 
+                                                sat_ca_SW, sat_cd_SW, sat_cs_SW, sat_R_body2ECEF_hists)
         t2 = time.time()
         print(f"Time SRP 2: {t2-t1}")
 
-        factor = 1 / (sat_dict['mass'] * LIGHT_SPEED)
+        factor = 1 / (np.atleast_1d(sat_mass)[:, None, None] * LIGHT_SPEED)
         a_erp, a_srp = factor * net_erp, factor * net_srp
 
     return a_erp, a_srp
@@ -1266,6 +1293,198 @@ def _integrate_net_vec(dF_beam_hist, sat_plate_normals, sat_plate_areas, sat_pla
 
 
 def _integrate_net_vec_codex(
+    dF_beam_hist,
+    sat_plate_normals,
+    sat_plate_areas,
+    sat_plate_ca,
+    sat_plate_cd,
+    sat_plate_cs,
+    sat_R_body2ECEF_hists,
+):
+    """Return c * force in ECEF, shaped (n_observers, n_times, 3).
+
+    Inputs:
+      dF_beam_hist: (n_observers, n_sources, n_times, 3), in W/m^2.
+      sat_plate_normals: a shared (n_plates, 3) array, or a list of
+          n_observers arrays shaped (n_plates_i, 3), with outward unit
+          body-frame normals.
+      areas and optical coefficients: a shared (n_plates,) array, or a list
+          of n_observers arrays shaped (n_plates_i,), with areas in m^2.
+      sat_R_body2ECEF_hists: (n_times, 3, 3) or
+          (n_observers, n_times, 3, 3), orthonormal rotations.
+
+    Each observer's properties must match its own number of normals; different
+    observers may have different plate counts, including zero. Properties can
+    independently be shared where their plate counts match. Stacked arrays,
+    tuples, and a singleton observer axis/list are also accepted. Exactly
+    repeated properties are treated as shared, without stacking input lists.
+
+    Shared normals/areas reuse the area-weighted normals across observers.
+    Matrix multiplications operate on bounded blocks of nonzero beams, with
+    observer slices only when properties differ. Plate properties are never
+    expanded along the beam axis.
+
+    Assumes finite inputs and no mutual shadowing between plates.
+    Divide by mass_kg * c_m_per_s to obtain acceleration in m/s^2.
+    """
+    F = np.asarray(dF_beam_hist)
+    if F.ndim != 4 or F.shape[-1] != 3:
+        raise ValueError(
+            "dF_beam_hist must have shape (n_observers, n_sources, n_times, 3)."
+        )
+    n_observers, n_sources, n_times, _ = F.shape
+
+    def plate_property(value, name, ndim):
+        shape = "(n_plates, 3)" if ndim == 2 else "(n_plates,)"
+        error = (f"{name} must be a shared {shape} array or a list/stack "
+                 f"of 1 or {n_observers} such arrays.")
+        is_sequence = isinstance(value, (list, tuple))
+        if is_sequence and len(value) == 0 and n_observers == 0:
+            return ()
+        if is_sequence and len(value) > 0 and np.ndim(value[0]) == ndim:
+            # Inspect each observer separately: ragged lists must not be stacked.
+            if len(value) not in (1, n_observers):
+                raise ValueError(error)
+            arrays = tuple(np.asarray(item, dtype=np.float64) for item in value)
+            if any(item.ndim != ndim or (ndim == 2 and item.shape[-1] != 3)
+                   for item in arrays):
+                raise ValueError(error)
+            # Identity avoids rescanning shared arrays repeated in a list.
+            if len(arrays) > 1 and all(
+                item is arrays[0] or np.array_equal(item, arrays[0])
+                for item in arrays[1:]
+            ):
+                arrays = arrays[:1]
+            return arrays
+
+        value = np.asarray(value, dtype=np.float64)
+        if value.ndim not in (ndim, ndim + 1):
+            raise ValueError(error)
+        if ndim == 2 and value.shape[-1] != 3:
+            raise ValueError(error)
+        if value.ndim == ndim:
+            return (value,)
+        if value.shape[0] not in (1, n_observers):
+            raise ValueError(error)
+        # Exact equality preserves small, intentional observer differences.
+        if value.shape[0] > 1 and (
+            value.strides[0] == 0 or np.all(value == value[:1])
+        ):
+            value = value[:1]
+        return tuple(value)
+
+    n = plate_property(sat_plate_normals, "sat_plate_normals", 2)
+    A = plate_property(sat_plate_areas, "sat_plate_areas", 1)
+    ca = plate_property(sat_plate_ca, "sat_plate_ca", 1)
+    cd = plate_property(sat_plate_cd, "sat_plate_cd", 1)
+    cs = plate_property(sat_plate_cs, "sat_plate_cs", 1)
+    properties = (n, A, ca, cd, cs)
+    plate_counts = np.array([item.shape[0] for item in n], dtype=np.intp)
+    for name, values in zip(
+        ("sat_plate_areas", "sat_plate_ca", "sat_plate_cd", "sat_plate_cs"),
+        properties[1:],
+    ):
+        counts = np.array([item.shape[0] for item in values], dtype=np.intp)
+        mismatch = np.flatnonzero(counts != plate_counts)
+        if mismatch.size:
+            j = int(mismatch[0])
+            expected = plate_counts[0 if len(n) == 1 else j]
+            actual = counts[0 if len(values) == 1 else j]
+            raise ValueError(
+                f"{name} has {actual} plates for observer {j}; "
+                f"sat_plate_normals has {expected}."
+            )
+    try:
+        R = np.broadcast_to(
+            np.asarray(sat_R_body2ECEF_hists, dtype=np.float64),
+            (n_observers, n_times, 3, 3),
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "sat_R_body2ECEF_hists must broadcast to "
+            "(n_observers, n_times, 3, 3)."
+        ) from exc
+
+    out = np.zeros((n_observers * n_times, 3), dtype=np.float64)
+    if not (n_observers and n_sources and n_times and np.any(plate_counts)):
+        return out.reshape(n_observers, n_times, 3)
+
+    # np.nonzero returns indices in row-major order, so observers are grouped.
+    observer, source, time = np.nonzero(np.any(F, axis=-1))
+    if observer.size == 0:
+        return out.reshape(n_observers, n_times, 3)
+
+    # Reuse common geometry/optics without allocating padded plate tables.
+    common_normal_T = -n[0].T if len(n) == 1 else None
+    common_area_normals = A[0][:, None] * n[0] if len(n) == len(A) == 1 else None
+    common_incoming = A[0] * (ca[0] + cd[0]) if len(A) == len(ca) == len(cd) == 1 else None
+    common_diffuse = (common_area_normals * ((2.0 / 3.0) * cd[0])[:, None]
+                      if common_area_normals is not None and len(cd) == 1 else None)
+    common_specular = (common_area_normals * (2.0 * cs[0])[:, None]
+                       if common_area_normals is not None and len(cs) == 1 else None)
+
+    if all(len(values) == 1 for values in properties):
+        slices = ((0, observer.size, 0),)
+    else:
+        bounds = np.searchsorted(observer, np.arange(n_observers + 1))
+        slices = ((bounds[j], bounds[j + 1], j)
+                  for j in np.flatnonzero(np.diff(bounds)))
+
+    # Keep beam, rotation, and cosine working arrays around 8 MiB per block.
+    # This also avoids allocating a full nonzero-beam-by-plate cosine array.
+    for first, last, j in slices:
+        nj, Aj, caj, cdj, csj = (values[0 if len(values) == 1 else j]
+                               for values in properties)
+        n_plates = nj.shape[0]
+        if n_plates == 0:
+            continue
+        normal_T = common_normal_T if common_normal_T is not None else -nj.T
+        area_normals = (common_area_normals if common_area_normals is not None
+                        else Aj[:, None] * nj)
+        w_in = common_incoming if common_incoming is not None else Aj * (caj + cdj)
+        w_diffuse = (common_diffuse if common_diffuse is not None
+                     else area_normals * ((2.0 / 3.0) * cdj)[:, None])
+        w_specular = (common_specular if common_specular is not None
+                      else area_normals * (2.0 * csj)[:, None])
+        block_size = max(1, (8 * 1024**2) // (8 * (n_plates + 24)))
+        for start in range(first, last, block_size):
+            stop = min(start + block_size, last)
+            obs, times = observer[start:stop], time[start:stop]
+            beam = np.asarray(F[obs, source[start:stop], times], dtype=np.float64)
+            magnitude = np.sqrt(np.einsum("ki,ki->k", beam, beam))
+            direction = np.einsum("ki,kij->kj", beam, R[obs, times])
+            direction /= magnitude[:, None]
+            del beam
+
+            mu = direction @ normal_T
+            np.maximum(mu, 0.0, out=mu)
+            force_body = (mu @ w_in)[:, None] * direction
+            del direction
+            force_body -= mu @ w_diffuse
+            np.square(mu, out=mu)
+            force_body -= mu @ w_specular
+            del mu
+            force_body *= magnitude[:, None]
+            del magnitude
+
+            # Only allocate bincount outputs for observers in this block.
+            offset = obs[0] * n_times
+            target = out[offset:(obs[-1] + 1) * n_times]
+            group = (obs * n_times + times) - offset
+            for component in range(3):
+                target[:, component] += np.bincount(
+                    group, weights=force_body[:, component],
+                    minlength=target.shape[0],
+                )
+            del force_body
+
+    # Rotate only the final observer/time sums back to ECEF.
+    return np.einsum(
+        "btij,btj->bti", R, out.reshape(n_observers, n_times, 3)
+    )
+
+
+def _integrate_net_vec_codex_v1(
     dF_beam_hist,
     sat_plate_normals,
     sat_plate_areas,
@@ -1369,8 +1588,11 @@ def F_vec_to_Fr(F_hist, stacked_u):
     if len(np.shape(stacked_u))==2: 
         # case a)
         # stacked_u shape is (np x 3)
-        ein_tag = 'itk,ik->it'
-
+        if len(np.shape(F_hist))==3:
+            ein_tag = 'itk,ik->it'
+        elif len(np.shape(F_hist))==2:
+            ein_tag = 'ik,ik->i'
+    
     elif len(np.shape(stacked_u))==3: 
         # case c) (and b?)
         # stacked_u shape is (np x n_steps x 3) (use for case b with np=1?)
@@ -1488,7 +1710,7 @@ def apply_SFF_rotation(R_ECEF_to_SunFrame_hist, stacked_vectors, mode="ECEF_to_S
         # stacked r shape: (np x 3 x n_steps)
         einsum_tag = 'tik,jtk->jti'
 
-    return np.einsum(einsum_tag, R_array, stacked_vectors)
+    return np.einsum(einsum_tag, R_array, stacked_vectors, optimize='optimal')
 
     """
     NOTE that the above is exactly the same as below, but faster and more compact

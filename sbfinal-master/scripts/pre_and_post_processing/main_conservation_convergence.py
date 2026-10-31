@@ -58,7 +58,7 @@ for EEI_name in EEI_names:
     full_jd_array = np.concatenate(all_daily_jd_arrays[:n_days])
     mid_day_jd_array = mid_day_jd_array_from_jd_interval(rad_config["jd_interval"])
 
-    regular_toa_grids = [get_toa_grid_from_rad_config(rad_config, deg_bin_size=d) for d in (10, 5, 2.5, 1, 0.5)]
+    regular_toa_grids = [get_toa_grid_from_rad_config(rad_config, deg_bin_size=d) for d in (10, 5, 2.5, 1)]
     n_points_reg_toa_grids = np.array([grid.n_points for grid in regular_toa_grids])
     glq_toa_grids = [get_toa_grid_from_rad_config(rad_config, glq_order=l) for l in glq_n_to_l(n_points_reg_toa_grids)]
     womersley_orders = np.array([51, 101, 151, 225, 325]) # np.round(np.sqrt(2*n_points_reg_toa_grids))
@@ -80,20 +80,24 @@ for EEI_name in EEI_names:
 
             for toa_idx, toa_grid in enumerate(toa_grids):
                 first_toa_idx = (toa_idx==0)
-                print(f"Now computing: TOA grid {toa_grid.grid_name}")
-                toa_LW_hist, toa_SW_hist, net_toa_hist = compute_flux_hist_toa(full_jd_array, rad_config, toa_grid)
-                #toa_LW_hist, toa_SW_hist, net_toa_hist = np.zeros((toa_grid.n_points, len(day_jd_array))), np.zeros((toa_grid.n_points, len(day_jd_array))), np.zeros((toa_grid.n_points, len(day_jd_array)))
-                toa_earth_hist = -(toa_LW_hist + toa_SW_hist)
-                toa_solar_hist = net_toa_hist - toa_earth_hist
+                toa_earth_fname = os.path.join(out_dir, 'integrated_earth_toa_hist_'+toa_grid.grid_name+'.npy')
+                toa_solar_fname = os.path.join(out_dir, 'integrated_solar_toa_hist_'+toa_grid.grid_name+'.npy')
 
-                integrated_earth_toa_hist = toa_grid.compute_surf_integral(toa_earth_hist)
-                integrated_solar_toa_hist = toa_grid.compute_surf_integral(toa_solar_hist)
+                if not(os.path.exists(toa_earth_fname)) or not(os.path.exists(toa_solar_fname)):
+                    print(f"Now computing: TOA grid {toa_grid.grid_name}")
+                    toa_LW_hist, toa_SW_hist, net_toa_hist = compute_flux_hist_toa(full_jd_array, rad_config, toa_grid)
+                    #toa_LW_hist, toa_SW_hist, net_toa_hist = np.zeros((toa_grid.n_points, len(day_jd_array))), np.zeros((toa_grid.n_points, len(day_jd_array))), np.zeros((toa_grid.n_points, len(day_jd_array)))
+                    toa_earth_hist = -(toa_LW_hist + toa_SW_hist)
+                    toa_solar_hist = net_toa_hist - toa_earth_hist
 
-                np.save(os.path.join(out_dir, 'integrated_earth_toa_hist_'+toa_grid.grid_name), integrated_earth_toa_hist)
-                np.save(os.path.join(out_dir, 'integrated_solar_toa_hist_'+toa_grid.grid_name), integrated_solar_toa_hist)
+                    integrated_earth_toa_hist = toa_grid.compute_surf_integral(toa_earth_hist)
+                    integrated_solar_toa_hist = toa_grid.compute_surf_integral(toa_solar_hist)
+
+                    np.save(toa_earth_fname, integrated_earth_toa_hist)
+                    np.save(toa_solar_fname, integrated_solar_toa_hist)
 
 
-                for altitude_grid in altitude_grids:
+                for altitude_grid in altitude_grids[:-3]:
                     fname_earth = os.path.join(out_dir, 'integrated_earth_'+str(altitude_km)+'_hist_'+altitude_grid.grid_name + 'from_toa_' + toa_grid.grid_name + '.npy')
                     fname_solar = os.path.join(out_dir, 'integrated_solar_'+str(altitude_km)+'_hist_'+altitude_grid.grid_name)
 

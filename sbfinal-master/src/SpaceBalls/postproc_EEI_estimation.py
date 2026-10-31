@@ -8,10 +8,11 @@ import astropy.coordinates as coord
 from astropy.time import Time, TimeDelta
 import astropy.units as u
 import copy
+import pickle
 
 from SpaceBalls.paths import CONFIG_DIR, MEDIA_DIR, INPUT_DIR, OUTPUT_DIR, PROJECT_ROOT
 from SpaceBalls.radiation_settings import radiation_settings_from_EEI_truth_name, get_n_days_EEI_truth, get_TSI_1AU
-from SpaceBalls.radiation_fluxes_preprocessing import get_toa_grid_from_rad_config, get_R_SunFrame_hist, get_cos_theta_s_lim, get_subdir_EEI_truth, get_EEI_truth_daily_jd_arrays, mid_day_jd_array_from_jd_interval, get_window_avg_maps, F_vec_to_Fr
+from SpaceBalls.radiation_fluxes_preprocessing import apply_SFF_rotation, get_r_sun_jd_hist, get_toa_grid_from_rad_config, get_R_SunFrame_hist, get_cos_theta_s_lim, get_subdir_EEI_truth, get_EEI_truth_daily_jd_arrays, mid_day_jd_array_from_jd_interval, get_window_avg_maps, F_vec_to_Fr
 from SpaceBalls.utils import load_input_file, progress_bar, normal_smoother, interp_zeroes_in_2D_data_array, compute_orbital_period, make_list_str_key, get_rolling_jd_windows, get_2D_to_1D_idx, find_idxs, fit_cos_sin_fixed_freq, notch_filter
 from SpaceBalls.sph_meshing import Grid, QuadratureGrid, RegularLatLonGrid, fit_sh_field, interp_zeroes_in_grid_data, compute_avg_d_eq_deg
 import SpaceBalls.input_database_manager as input_manager
@@ -25,7 +26,7 @@ R_SUN = constants.sun_radius(units='km')
 TOA_S_0 = 4*np.pi*RE**2      # basic TOA surface area in km2 (only for EEI truths 0, 1, 2)
 LIGHT_SPEED = constants.light_speed(units='m/s')
 
-OUTPUT_VARS = ['jd_vec', 'aero', 'erp', 'srp', 'total_grav', 'xyz_ecef', 'xyz_sun_frame']
+OUTPUT_VARS = ['jd_vec', 'aero', 'erp', 'srp', 'total_grav', 'xyz_ecef', 'xyz_sun_frame', 'hxhyhz_ecef', 'ecef2ric_hist']
 ANIMATIONS_DIR = os.path.join(MEDIA_DIR, 'animations')
 
 def read_data(sb_names):
@@ -51,7 +52,7 @@ def read_data(sb_names):
 def estimate_EEI_avg(sb_names, jd_windows, grid: Grid, frame, method='binary_gridding', 
                      fill_zeroes_method='theta_s_fit_simplified', avg_method='numeric_integral', 
                      meas_mode="monte", make_plots=False, return_avg_flux_maps=False, accelerometer_dict=dict(),
-                     EEI_truth_meas=None):
+                     EEI_truth_meas=None, meas_filter=None):
     
     if frame=="ECEF":
         print("ECEF stacking frame - changing fill_zeroes_method to nearest")
@@ -61,10 +62,12 @@ def estimate_EEI_avg(sb_names, jd_windows, grid: Grid, frame, method='binary_gri
     #  - binary_gridding -> required fill_method (zeroes, theta_s_fit_simplified (default), theta_s_fit_accurate)
     #  - gaussian weighting # TBC
 
-    n_batches = 1 if method=="binary_gridding" else 5  # TODO: estimate actual memory usage
+    n_batches = 2 if method=="binary_gridding" else 5  # TODO: estimate actual memory usage
     jd_windows_split = np.array_split(jd_windows, n_batches)
 
     estimated_EEI_series = [None] * n_batches
+    avg_altitude_series = [None] * n_batches
+    avg_beta_series =[None] * n_batches
     if return_avg_flux_maps: estimated_maps = [None] * n_batches 
 
     for batch_i, jd_windows in enumerate(jd_windows_split):
@@ -76,12 +79,35 @@ def estimate_EEI_avg(sb_names, jd_windows, grid: Grid, frame, method='binary_gri
         
         radial_flux_meas_arrays, meas_weight_arrays = get_radial_measurement_arrays(
             sb_names, grid, method, frame, meas='flux', jd_windows=jd_windows, meas_mode=meas_mode, 
-            accelerometer_dict=accelerometer_dict, EEI_truth_meas=EEI_truth_meas) # sparse arrays
+            accelerometer_dict=accelerometer_dict, EEI_truth_meas=EEI_truth_meas, meas_filter=meas_filter) # sparse arrays     
+                
+        altitude_meas_arrays, _ = get_radial_measurement_arrays(
+            sb_names, grid, method, frame, meas='altitude', jd_windows=jd_windows) # sparse arrays
+
+        # beta_angles_meas_arrays, _ = get_radial_measurement_arrays(
+        #     sb_names, grid, method, frame, meas='beta_angle', jd_windows=jd_windows, EEI_truth_meas=EEI_truth_meas) # sparse arrays
+
         
         avg_flux_maps, vars_flux_maps, counts = get_stacked_avg_maps(jd_windows, jd_hist_array, 
                                                                      radial_flux_meas_arrays, 
                                                                      meas_weight_arrays, 
                                                                      compute_variances=(avg_method=="c00_fit")) # streteched (column for all grid points)
+        #avg_flux_maps = get_stacked_avg_maps_new(jd_windows, jd_hist_array, radial_flux_meas_arrays, meas_weight_arrays)
+        
+        avg_alt_maps, vars_alt_maps, _ = get_stacked_avg_maps(jd_windows, jd_hist_array, 
+                                                                     altitude_meas_arrays, 
+                                                                     meas_weight_arrays, 
+                                                                     compute_variances=(avg_method=="c00_fit")) # streteched (column for all grid points)
+        # avg_beta_maps, _, _ = get_stacked_avg_maps(jd_windows, jd_hist_array, 
+        #                                                              beta_angles_meas_arrays, 
+        #                                                              meas_weight_arrays, 
+        #                                                              compute_variances=(avg_method=="c00_fit")) # streteched (column for all grid points)
+                
+        avg_alt_maps[avg_alt_maps==0] = np.mean(avg_alt_maps[avg_alt_maps!=0])
+        alt_map_to_plot = avg_alt_maps[100]
+        alt_map_to_plot[np.abs(alt_map_to_plot)<1e-3] = np.nan
+        Plotter.plot_geo_data_new(alt_map_to_plot, grid, make_symmetric_cmap=False,
+                                  data_label=r'$\|\vec r\| - R_{eq}$ (km)')
 
         del(radial_flux_meas_arrays, meas_weight_arrays)
         
@@ -93,7 +119,7 @@ def estimate_EEI_avg(sb_names, jd_windows, grid: Grid, frame, method='binary_gri
         
         if avg_method=="numeric_integral":
             if fill_zeroes_method=="theta_s_fit_simplified":
-                avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_flux_maps, grid, 
+                avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_flux_maps, grid, counts,
                                                                                             [make_plots]*len(avg_flux_maps))
             elif fill_zeroes_method=="theta_s_fit_accurate":                                  
                 avg_flux_maps = fill_unobserved_cells_map_array_with_theta_s_fit_accurate(sb_names, avg_flux_maps, jd_windows, 
@@ -110,11 +136,20 @@ def estimate_EEI_avg(sb_names, jd_windows, grid: Grid, frame, method='binary_gri
             toa_grid = get_toa_grid_from_rad_config(radiation_settings_from_EEI_truth_name(EEI_truth_meas))
             toa_S = toa_grid.total_area
 
+        int_weight_corrs = (RE + avg_alt_maps)**2 / (RE + grid.alt_km)**2
+        #int_weight_corrs[avg_alt_maps==0] = 1
         estimated_EEI_series[batch_i] = compute_avg_EEI_from_avg_maps(avg_flux_maps, grid, method=avg_method, toa_S=toa_S,
-                                                                      avg_maps_vars=vars_flux_maps, avg_maps_counts=counts)
-    
+                                                                      avg_maps_vars=vars_flux_maps, avg_maps_counts=counts,
+                                                                      weight_corr_map_hist=int_weight_corrs) # int_weight_corrs
+
+        avg_altitude_series[batch_i] = compute_avg_EEI_from_avg_maps(avg_alt_maps, grid, method=avg_method, toa_S=grid.total_area,
+                                                                     weight_corr_map_hist=None)
+
+        # avg_beta_series[batch_i] = compute_avg_EEI_from_avg_maps(avg_beta_maps, grid, method=avg_method, toa_S=grid.total_area,
+        #                                                                      weight_corr_map_hist=None)
+
     if return_avg_flux_maps:
-        return np.concatenate(estimated_EEI_series), np.vstack(estimated_maps)
+        return np.concatenate(estimated_EEI_series), np.vstack(estimated_maps), np.concatenate(avg_altitude_series) # , np.concatenate(avg_beta_series)
     else:
         return np.concatenate(estimated_EEI_series)
 
@@ -131,8 +166,8 @@ def estimate_EEI_avg_single_batch(sb_names, jd_windows, grid: Grid, frame, metho
 
     #if method=="binary_gridding": # every measurement is either inside a grid cell or not. No weights applied
 
-    radial_flux_meas_arrays = get_radial_measurement_arrays(sb_names, grid, method, frame, meas='flux') # NOTE: meas_mode missing here! # sparse arrays
-    
+    radial_flux_meas_arrays = get_radial_measurement_arrays(sb_names, grid, method, frame, meas='flux') # NOTE: meas_mode and meas_filter missing here! # sparse arrays
+
     avg_flux_maps = get_stacked_avg_maps(jd_windows, jd_hist_array, radial_flux_meas_arrays) # streteched (column for all grid points)
     
     # NOTE: the following version avoids looping over individual satellites but it's not more efficient (at least with <=10 sats.)
@@ -156,20 +191,58 @@ def estimate_EEI_avg_single_batch(sb_names, jd_windows, grid: Grid, frame, metho
 
 
 def get_radial_measurement_arrays(input_names, grid: Grid, method, frame='ECEF', meas='flux', 
-                                  jd_windows=None, meas_mode="monte", accelerometer_dict=dict(), EEI_truth_meas=None):  # frame: "ECEF" or "SFF"
+                                  jd_windows=None, meas_mode="monte", accelerometer_dict=dict(), 
+                                  EEI_truth_meas=None, meas_filter=None, apply_correction=False):  # frame: "ECEF" or "SFF"
     
     n_sb = len(input_names)
     _ = check_EEI_consistency(input_names)
     #h_lat_lon_hist_array = get_h_lat_lon_hist_array(input_names, frame)
     print(f"Getting r_hist_array...")
     r_hist_array = get_r_hist_array(input_names, frame, jd_windows, downsample_dt=accelerometer_dict.get('subsample_dt'))
+    r_norm_hist_array = [get_norm_across_last_dim(r_hist) for r_hist in r_hist_array]
+    correction_factors_array = [r_norm_hist**2 / (RE + grid.alt_km)**2 for r_norm_hist in r_norm_hist_array]
     
     #if accelerometer_dict.get('subsample_dt') is not None:
     #    r_hist_array = [r_hist[:-1,:] for r_hist in r_hist_array] # awful patch! TODO: figure that out...
 
+    correct_TSI = False
     # build 3D measurement arrays:
-    all_radial_measurement_arrays = get_radial_measurements_array(input_names, meas, jd_windows, meas_mode, 
-                                                                  accelerometer_dict=accelerometer_dict, EEI_truth_meas=EEI_truth_meas)
+    if meas=="altitude":
+        all_radial_measurement_arrays = [get_norm_across_last_dim(r_hist)-RE for r_hist in r_hist_array]
+    elif meas=="beta_angle":
+        jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
+        rad_config = radiation_settings_from_EEI_truth_name(EEI_truth_meas)
+        r_sun_hist = get_r_sun_jd_hist(rad_config, jd_hist_array[0])
+        h_vec_array = get_full_output_var_hist(input_names, 'hxhyhz_ecef')
+        beta_angles = [np.acos(np.einsum('tk,tk->t', 
+                               r_sun_hist/get_norm_across_last_dim(r_sun_hist)[:,None], 
+                               h_vec_hist/get_norm_across_last_dim(h_vec_hist)[:,None]))
+                        for h_vec_hist in h_vec_array]
+        all_radial_measurement_arrays = beta_angles
+        # we're here - compute consistently with jd windows (or re-do batching so it does not split across time?)
+
+    else:
+        all_radial_measurement_arrays = get_radial_measurements_array(input_names, meas, jd_windows, meas_mode, 
+                                                                  accelerometer_dict=accelerometer_dict, 
+                                                                  EEI_truth_meas=EEI_truth_meas, meas_filter=meas_filter)
+        if correct_TSI:
+            # temporary test #####################################
+            jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
+            rad_config = radiation_settings_from_EEI_truth_name(EEI_truth_meas)
+            r_sun_hist = get_r_sun_jd_hist(rad_config, jd_hist_array[0])
+            d_sat_sun_actual = [get_norm_across_last_dim(r_hist - r_sun_hist) for r_hist in r_hist_array]
+            r_hist_array_fixed_alt = [r_hist/get_norm_across_last_dim(r_hist)[:,None] * (RE + grid.alt_km) for r_hist in r_hist_array]
+            d_sat_sun_fixed = [get_norm_across_last_dim(r_hist - r_sun_hist) for r_hist in r_hist_array_fixed_alt]
+            TSI_corrections = [(d/d_fixed)**2 for (d, d_fixed) in zip(d_sat_sun_actual, d_sat_sun_fixed)]
+            print(f"Applying TSI correction to measurements")
+            all_radial_measurement_arrays = [arr*corr for (arr, corr) in zip(all_radial_measurement_arrays, TSI_corrections)]
+            ######################################################
+        
+    if apply_correction:
+        print(f"Applying integratioin weight correction to measurements")
+        all_radial_measurement_arrays = [meas * corr for (meas, corr) in zip(all_radial_measurement_arrays, correction_factors_array)]
+
+    
     #all_radial_measurement_arrays_og = get_radial_measurements_array(input_names, meas, jd_windows, meas_mode="monte")
     all_sparse_meas_arrays = [None] * n_sb
     all_sparse_weight_arrays = [None] * n_sb
@@ -187,7 +260,7 @@ def get_radial_measurement_arrays(input_names, grid: Grid, method, frame='ECEF',
 
 
 def get_radial_measurements_array(input_names, meas, jd_windows=None, meas_mode="monte", 
-                                  accelerometer_dict=dict(), EEI_truth_meas=None):
+                                  accelerometer_dict=dict(), EEI_truth_meas=None, meas_filter=None):
 
     if meas=="flux":
         conversion_factors = [get_acc_to_flux_factor(sc) for sc in input_names]
@@ -195,7 +268,8 @@ def get_radial_measurements_array(input_names, meas, jd_windows=None, meas_mode=
         conversion_factors = [1 for _ in range(len(input_names))]
 
     acc_meas_hist_array = get_simulated_accelerometer_measurements(input_names, jd_windows=jd_windows, meas_mode=meas_mode, 
-                                                                   accelerometer_dict=accelerometer_dict, EEI_truth_meas=EEI_truth_meas)
+                                                                   accelerometer_dict=accelerometer_dict, EEI_truth_meas=EEI_truth_meas,
+                                                                   meas_filter=meas_filter)
 
     all_radial_measurement_arrays = [None] * len(input_names)
     for sc_i in range(len(input_names)):
@@ -558,13 +632,14 @@ def convolve_A_AI_2(A_in, first_last_idxs):
 
 
 def compute_avg_EEI_from_avg_maps(radial_flux_avg_maps, grid: Grid, avg_maps_vars=None, avg_maps_counts=None,
-                                   method="c00_fit", toa_S=TOA_S_0):
+                                   method="c00_fit", toa_S=TOA_S_0, weight_corr_map_hist=None):
     # old:
     # avg_EEI = np.sum(np.array(radial_flux_avg_maps) * grid_cell_areas_CV[None,:,:], axis=(1,2)) / Earth_S
 
     if method=="numeric_integral":
         # NOTE that compute_surf_integral includes weights scaled in km2, hence TOA_S must also be in km2
-        avg_EEI_series = grid.compute_surf_integral(np.array(radial_flux_avg_maps).T) / toa_S
+        avg_EEI_series = grid.compute_surf_integral(np.array(radial_flux_avg_maps).T, 
+                                                    weight_corrections=weight_corr_map_hist) / toa_S
 
     elif method=="c00_fit":
         assert((avg_maps_vars is not None) and (avg_maps_counts is not None))
@@ -605,24 +680,25 @@ def compute_avg_EEI_from_avg_maps(radial_flux_avg_maps, grid: Grid, avg_maps_var
 
 
 
-def fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_map_array, grid: Grid, make_plot_bool_array=None):
+def fill_unobserved_cells_map_array_with_theta_s_fit_simplified(avg_map_array, grid: Grid, counts_maps, make_plot_bool_array=None):
     
     if make_plot_bool_array is None: make_plot_bool_array = [False] * len(avg_map_array)    
     out_map_array = [None] * len(avg_map_array)
     #cos_theta_s_lim = get_cos_theta_s_lim(grid.alt_km)
 
-    make_plot_bool_array[70] = True
+    make_plot_bool_array[100] = True
+    #make_plot_bool_array[1500] = True
     
     for i, avg_map in enumerate(avg_map_array):
-        out_map_array[i] = fill_unobserved_cells_with_theta_s_interp(avg_map, grid, make_plots=make_plot_bool_array[i])
+        out_map_array[i] = fill_unobserved_cells_with_theta_s_interp(avg_map, counts_maps[i], grid, make_plots=make_plot_bool_array[i])
 
     return out_map_array
 
 
-def fill_unobserved_cells_map_array_with_theta_s_fit_accurate(input_names, avg_map_array, jd_windows, grid: Grid, plots_bool_array):
+def fill_unobserved_cells_map_array_with_theta_s_fit_accurate(input_names, avg_map_array, jd_windows, grid: Grid, plots_bool_array, meas_filter):
 
     # radial_meas_array has been loaded before but this reloading is not looped and this is cleaner
-    all_radial_measurement_arrays = get_radial_measurements_array(input_names, 'flux')
+    all_radial_measurement_arrays = get_radial_measurements_array(input_names, 'flux', meas_filter=meas_filter)
     cos_theta_s_hist_array = get_full_output_var_hist(input_names, 'cos_theta_s')
     jd_hist_array = get_full_output_var_hist(input_names, 'jd_vec')
 
@@ -645,7 +721,7 @@ def fill_unobserved_cells_map_array_with_theta_s_fit_accurate(input_names, avg_m
 
 
 
-def fill_unobserved_cells_with_theta_s_interp(avg_map, grid: Grid, mode="biquadratic",
+def fill_unobserved_cells_with_theta_s_interp(avg_map, counts_map, grid: Grid, mode="linear",
                                               meas_vec_for_fit=None, cos_theta_s_vec_for_fit=None, make_plots=False):
     
     cos_theta_s_lim = get_cos_theta_s_lim(grid.alt_km)
@@ -659,7 +735,7 @@ def fill_unobserved_cells_with_theta_s_interp(avg_map, grid: Grid, mode="biquadr
     map_cos_theta_s_vec = -np.cos(np.radians(LAT_vec)) * np.cos(np.radians(LON_vec))  
 
     #zero_idxs, nonzero_idxs = (avg_map==0), (avg_map!=0)
-    zero_idxs = np.abs(avg_map)<1e-9
+    zero_idxs = (counts_map==0) #np.abs(avg_map)<1e-9
     nonzero_idxs = ~zero_idxs
 
     if meas_vec_for_fit is None and cos_theta_s_vec_for_fit is None:
@@ -677,7 +753,7 @@ def fill_unobserved_cells_with_theta_s_interp(avg_map, grid: Grid, mode="biquadr
     avg_map[zero_idxs] = meas_vs_cos_theta_s_function(map_cos_theta_s_vec[zero_idxs], cos_theta_s_lim, c, coeffs, 
                                                       mode, cos_theta_s_lim_buffer=eclipse_buffer)
 
-    #if make_plots: Plotter.plot_geo_data_new(avg_map, grid=grid, add_coastlines=False)
+    if make_plots: Plotter.plot_geo_data_new(avg_map, grid=grid, add_coastlines=False)
 
     return avg_map
 
@@ -799,10 +875,18 @@ def fill_unobserved_cells(avg_map, grid: Grid, method):
     elif method=='nearest' or method=='linear' or method=='cubic':
         #return interp_zeroes_in_2D_data_array(avg_map, method=method)
         return interp_zeroes_in_grid_data(avg_map, grid, method=method)
+    
+    elif method is None:
+        return avg_map
 
 def load_ideal_RIC_acc_meas(input_names, add_drag=True, jd_windows=None, meas_mode="monte",
-                            EEI_truth_meas=None):
+                            EEI_truth_meas=None, meas_filter=None):
     if EEI_truth_meas is None: assert(meas_mode=="monte")
+    only_earth, only_sun = False, False
+    if meas_filter=="earth":
+        only_earth = True
+    elif meas_filter=="sun":
+        only_sun = True
     
     if meas_mode=="monte":
         srp_acc_tag_end = ''
@@ -823,24 +907,38 @@ def load_ideal_RIC_acc_meas(input_names, add_drag=True, jd_windows=None, meas_mo
 
         # erp_acc_tag_end = '_recomp_radial' #'_recomp_radial_131' #'_' + meas_mode
         # srp_acc_tag_end = '_recomp_radial' #'_' + rm_toa_order(meas_mode) # TODO!
-
-    #elif meas_mode=="recomp_radial":
-    #    rp_acc_tag_end = '_recomp_radial'
-    #    erp_acc_tag_end = '_recomp_radial'
+    
     srp_acc_hist_array = get_full_output_var_hist(input_names, 'srp'+srp_acc_tag_end, jd_windows=jd_windows)
     erp_acc_hist_array = get_full_output_var_hist(input_names, 'erp'+erp_acc_tag_end, jd_windows=jd_windows)
+    if only_earth:
+        srp_acc_hist_array = [srp*0 for srp in srp_acc_hist_array]
+    if only_sun:
+        erp_acc_hist_array = [erp*0 for erp in erp_acc_hist_array]
 
+    converted_to_RIC = False
     if meas_mode=="recomp_radial_new":
-        #r_hist_array = get_full_output_var_hist(input_names, 'xyz_ecef', jd_windows=jd_windows)
-        
-        r_hist_array = get_r_hist_array(input_names, "ECEF", jd_windows)
 
-        # NOTE: F_vec_to_Fr flips the sign back from wrong to right (bug in early versions of acc. recomp.)
-        srp_acc_hist_array = [np.squeeze(F_vec_to_Fr(srp[None,...], (r_hist/get_norm_across_last_dim(r_hist)[...,None])[None,...])) 
-                              for srp, r_hist in zip(srp_acc_hist_array, r_hist_array)]
+        # check if ecef2ric_hist exists
+        #fnames = [os.path.join(OUTPUT_DIR, sb_tag, 'day_0', 'ecef2ric_hist.npy') for sb_tag in input_names]
+        #existences = [os.path.exists(fname) for fname in fnames]
+        ecef2ric_hist_array = get_full_output_var_hist(input_names, 'ecef2ric_hist', jd_windows=jd_windows)
 
-        erp_acc_hist_array = [np.squeeze(F_vec_to_Fr(erp[None,...], (r_hist/get_norm_across_last_dim(r_hist)[...,None])[None,...])) 
-                              for erp, r_hist in zip(erp_acc_hist_array, r_hist_array)]
+        if np.all([ecef2ric is not None for ecef2ric in ecef2ric_hist_array]):
+            #ecef2ric_hist_array = get_full_output_var_hist(input_names, 'ecef2ric_hist', jd_windows=jd_windows)
+            # NOTE: minus sign for consistency with bug in acc recomp (flipping from wrong to right here)
+            srp_acc_hist_array = [-np.einsum('tij,tj->ti', ecef2ric, srp) for (srp, ecef2ric) in zip(srp_acc_hist_array, ecef2ric_hist_array)]
+            erp_acc_hist_array = [-np.einsum('tij,tj->ti', ecef2ric, erp) for (erp, ecef2ric) in zip(erp_acc_hist_array, ecef2ric_hist_array)]
+            converted_to_RIC = True                        
+
+        else:
+            r_hist_array = get_r_hist_array(input_names, "ECEF", jd_windows)
+
+            # NOTE: F_vec_to_Fr flips the sign back from wrong to right (bug in early versions of acc. recomp.)
+            srp_acc_hist_array = [np.squeeze(F_vec_to_Fr(srp[None,...], (r_hist/get_norm_across_last_dim(r_hist)[...,None])[None,...])) 
+                                for srp, r_hist in zip(srp_acc_hist_array, r_hist_array)]
+            
+            erp_acc_hist_array = [np.squeeze(F_vec_to_Fr(erp[None,...], (r_hist/get_norm_across_last_dim(r_hist)[...,None])[None,...])) 
+                                for erp, r_hist in zip(erp_acc_hist_array, r_hist_array)]
 
     if add_drag:
         aero_acc_hist_array = get_full_output_var_hist(input_names, 'aero', jd_windows=jd_windows)
@@ -854,11 +952,14 @@ def load_ideal_RIC_acc_meas(input_names, add_drag=True, jd_windows=None, meas_mo
         acc_meas_hist_array[sc_i] = (aero_acc_hist_array[sc_i] + srp_acc_hist_array[sc_i] + erp_acc_hist_array[sc_i]) * 1e3 # accelerations are stored in km/s2!
 
 
-    if "radial" in meas_mode:  # PATCH: we need non-radial measurements for accelerometer errors, but we add them here systematically for consistency
-        
-        # acc_hist_monte = [np.zeros((len(erp), 3)) for erp in erp_acc_hist_array]
+    if ("radial" in meas_mode) and not(converted_to_RIC):  # PATCH: we need non-radial measurements for accelerometer errors, but we add them here systematically for consistency
+
+        # if '2b78d2ff8194ce1d' in input_names: # super shabby patch (TBC)
+        #     acc_hist_monte = [np.zeros((len(erp), 3)) for erp in erp_acc_hist_array]
+        # else:
+
         acc_hist_monte = get_simulated_accelerometer_measurements(input_names, add_drag=True, 
-                                                                    jd_windows=jd_windows, meas_mode="monte")
+                                                                    jd_windows=jd_windows, meas_mode="monte", meas_filter=meas_filter)
         acc_hist_RIC_array = [None] * len(acc_hist_monte)
         for i, acc_RIC_monte in enumerate(acc_hist_monte):
             acc_hist_RIC_array[i] = np.hstack((acc_meas_hist_array[i][:,None], acc_RIC_monte[:,1:]))
@@ -869,9 +970,9 @@ def load_ideal_RIC_acc_meas(input_names, add_drag=True, jd_windows=None, meas_mo
 
 
 def get_simulated_accelerometer_measurements(input_names, add_drag=False, jd_windows=None, meas_mode="monte",
-                                             accelerometer_dict=dict(), EEI_truth_meas=None): # add_noise=False
+                                             accelerometer_dict=dict(), EEI_truth_meas=None, meas_filter=None): # add_noise=False
 
-    acc_hist_RIC_array = load_ideal_RIC_acc_meas(input_names, add_drag, jd_windows, meas_mode, EEI_truth_meas)
+    acc_hist_RIC_array = load_ideal_RIC_acc_meas(input_names, add_drag, jd_windows, meas_mode, EEI_truth_meas, meas_filter=meas_filter)
 
     if accelerometer_dict: # accelerometer_dict is not empty - measurements are not perfect
 
@@ -989,23 +1090,48 @@ def get_h_lat_lon_hist_array(input_names, frame):  # TODO: add jd_windows and do
 def get_r_hist_array(input_names, frame, jd_windows=None, downsample_dt=None):
 
     if frame=="ECEF":
-        return get_full_output_var_hist(input_names, 'xyz_ecef', jd_windows=jd_windows, downsample_dt=downsample_dt)
+        frame_tag = '_ecef'
     elif frame=="SFF":
-        return get_full_output_var_hist(input_names, 'xyz_sun_frame', jd_windows=jd_windows, downsample_dt=downsample_dt)
+        frame_tag = '_sun_frame'        
     else:
         print("frame has to be either ECEF or SFF")
 
+    return get_full_output_var_hist(input_names, 'xyz'+frame_tag, jd_windows=jd_windows, downsample_dt=downsample_dt)
 
-def get_full_output_var_hist(case_names, var_name, jd_windows=None, n_days=None, downsample_dt=None):
+
+def get_full_output_var_hist(input_names, var_name, jd_windows=None, n_days=None, downsample_dt=None):
 
     # TODO: n_days should not really be an input
     if n_days is None:
-        n_days, completed_bool = get_n_days_max(case_names)
+        n_days, completed_bool = get_n_days_max(input_names)
 
-    n_SC = len(case_names)
+    n_SC = len(input_names)
+    print(f"Loading variable {var_name}...")
+
+    """
+    input_names = input_names.copy()
+    # check if files exist for current input (check for day 0 only, assume all days)
+    if ('erp' not in var_name) and ('srp' not in var_name):
+        for i, sb_tag in enumerate(input_names):
+            fname = os.path.join(OUTPUT_DIR, sb_tag, 'day_0', var_name+'.npy')
+            if not(os.path.exists(fname)):
+                input_sb_dict = input_manager.get_dicts(sb_tag)
+                # we expect r files not existing for plated spheres that have never been propagated with MONTE - load SC_0 trajectories instead
+                assert(input_sb_dict['sc_params']['sc_name']!="SC_0")
+                alt_sb_key = input_manager.get_primary_keys(
+                    {'orbit_name': input_sb_dict['orbit']['orbit_name'],
+                    'force_settings': input_sb_dict['force_settings']['settings_num'],
+                    'SC_name': 'SC_0',
+                    'integration_settings': input_sb_dict['integration_settings']['settings_num'],
+                    'delta_t_out': input_sb_dict['delta_t_out']
+                    })
+                assert(len(alt_sb_key)==1)
+                print(f"changed {input_names[i]} for {alt_sb_key[0]}")
+                input_names[i] = alt_sb_key[0]
+    """
     
     all_var_hist = [None] * n_SC
-    for i, case in enumerate(case_names):
+    for i, case in enumerate(input_names):
         var_hist = get_output_variable_hist(case, n_days, var_name, 
                                             completed_bool, jd_windows=jd_windows,
                                             downsample_dt=downsample_dt) # completed_bool: only store stacked file if all days are done
@@ -1014,8 +1140,30 @@ def get_full_output_var_hist(case_names, var_name, jd_windows=None, n_days=None,
     return all_var_hist
 
 
-def get_output_variable_hist(sb_name, n_days, var_name, save_stacked_file_if_nonexistent=True, jd_windows=None, downsample_dt=None):   # for jd: var_name=jd_vec
+def get_output_variable_hist(sb_name_in, n_days, var_name, save_stacked_file_if_nonexistent=True, jd_windows=None, downsample_dt=None):   # for jd: var_name=jd_vec
     print(f"Getting output variable: {var_name}")
+    
+    if ('erp' not in var_name) and ('srp' not in var_name):
+        fname = os.path.join(OUTPUT_DIR, sb_name_in, 'day_0', var_name+'.npy')
+        if not(os.path.exists(fname)):
+            input_sb_dict = input_manager.get_dicts(sb_name_in)
+            # we expect r files not existing for plated spheres that have never been propagated with MONTE - load SC_0 trajectories instead
+            assert(input_sb_dict['sc_params']['sc_name']!="SC_0")
+            alt_sb_key = input_manager.get_primary_keys(
+                {'orbit_name': input_sb_dict['orbit']['orbit_name'],
+                'force_settings': input_sb_dict['force_settings']['settings_num'],
+                'SC_name': 'SC_0',
+                'integration_settings': input_sb_dict['integration_settings']['settings_num'],
+                'delta_t_out': input_sb_dict['delta_t_out']
+                })
+            assert(len(alt_sb_key)==1)
+            print(f"changed {sb_name_in} for {alt_sb_key[0]}")
+            sb_name = alt_sb_key[0]
+        else:
+            sb_name = sb_name_in
+    else:
+        sb_name = sb_name_in
+
     #stacked_var_file_name = os.path.join(OUTPUT_DIR, case_name, 'data_output', 'concatenated_'+var_name+'.npy')
     stacked_var_file_name = os.path.join(OUTPUT_DIR, sb_name, 'concatenated_'+var_name+'.npy')
     if os.path.exists(stacked_var_file_name) and (n_days==1826 or (n_days is None)): # TODO: hard-coded n_days max
@@ -1032,8 +1180,10 @@ def get_output_variable_hist(sb_name, n_days, var_name, save_stacked_file_if_non
         else:
             stacked_var_array = compute_stacked_out_var_hist(sb_name, var_name, n_days)
 
-        if save_stacked_file_if_nonexistent:
-            assert(stacked_var_array is not None)
+        if stacked_var_array is None:
+            return stacked_var_array
+        elif save_stacked_file_if_nonexistent:
+        #    assert(stacked_var_array is not None)
             np.save(stacked_var_file_name, stacked_var_array)
     
     return stacked_var_array
@@ -1134,6 +1284,8 @@ def load_and_stack_output_var_hist(case_name, var_name, n_days):
         stacked_var_array = np.concatenate(daily_var_hist_array)
     elif len(np.shape(daily_var_hist_array[0]))==2:
         stacked_var_array = np.vstack(daily_var_hist_array)
+    elif len(np.shape(daily_var_hist_array[0]))==3:
+        stacked_var_array = np.concatenate(daily_var_hist_array, axis=0)
     
     return stacked_var_array
 
@@ -1149,9 +1301,11 @@ def compute_stacked_out_var_hist(case_name, var_name, n_days):
 
     elif var_name=="cos_theta_s":
         return compute_cos_theta_s_hist_array(case_name, n_days)
-    
-    elif var_name=="erp_recomp":
+
+    else:
         return None
+    #elif var_name=="erp_recomp":
+    #    return None
 
 
 def recompute_all_erp_srp_acc_meas(sb_name):    # not completed and not necessary
@@ -1230,7 +1384,8 @@ def check_EEI_consistency(input_names):
     return EEI_name
 
 
-def get_true_EEI_time_series(EEI_name, n_days=None, grid_name=None):
+def get_true_EEI_time_series(EEI_name, n_days=None, grid_name=None, mode="net"):
+    assert((mode=="net") or (mode=="earth") or (mode=="sun"))
     if EEI_name=="EEI_truth_351": EEI_name = "EEI_truth_35" # patch
     if EEI_name=="EEI_truth_31" or EEI_name=="EEI_truth_4" or EEI_name=="EEI_truth_41" or EEI_name=="EEI_truth_42": EEI_name = "EEI_truth_3"
     
@@ -1250,26 +1405,46 @@ def get_true_EEI_time_series(EEI_name, n_days=None, grid_name=None):
     else:
         store_concatenated_file = False
         load_all_days = False
-    subdir = get_subdir_EEI_truth(EEI_name, 'daily_hist_net_toa_surf_avg',
-                                  grid_name=grid_name)
 
+    concatenated_net_toa_time_series = load_concatenated_time_series(
+        EEI_name, grid_name, "net", n_days, load_all_days, store_concatenated_file)
+
+    if mode=="net":
+        return concatenated_net_toa_time_series
+    else:
+        concatenated_earth_toa_time_series = -load_concatenated_time_series(
+                EEI_name, grid_name, "earth", n_days, load_all_days, store_concatenated_file)
+
+        if mode=="earth":
+            return concatenated_earth_toa_time_series
+        elif mode=="sun":
+            return concatenated_net_toa_time_series - concatenated_earth_toa_time_series
+
+
+def load_concatenated_time_series(EEI_name, grid_name, mode, n_days, load_all_days, 
+                                  store_concatenated_file=False):
+
+    subdir = get_subdir_EEI_truth(EEI_name, 'daily_hist_'+mode+'_toa_surf_avg',
+                                  grid_name=grid_name)
+    
     full_time_series_fname = os.path.join(subdir, 'concatenated_time_series.npy')
     if load_all_days and os.path.exists(full_time_series_fname):
-        concatenated_net_toa_time_series = np.load(full_time_series_fname)
+        concatenated_toa_time_series = np.load(full_time_series_fname)
     else:
-        all_net_toa_time_series = [None] * n_days
+        all_toa_time_series = [None] * n_days
         for day_idx in range(n_days):
             day_fname = os.path.join(subdir, 'day_'+str(day_idx))
             if os.path.exists(day_fname+'.npy'):
-                all_net_toa_time_series[day_idx] = np.load(day_fname+'.npy')
+                all_toa_time_series[day_idx] = np.load(day_fname+'.npy')
             elif os.path.exists(day_fname+'.txt'):
-                all_net_toa_time_series[day_idx] = np.loadtxt(day_fname+'.txt')
+                all_toa_time_series[day_idx] = np.loadtxt(day_fname+'.txt')
 
-        concatenated_net_toa_time_series = np.concatenate(all_net_toa_time_series)    
+        concatenated_toa_time_series = np.concatenate(all_toa_time_series)    
         if store_concatenated_file:
-            np.save(full_time_series_fname,concatenated_net_toa_time_series)
+            np.save(full_time_series_fname, concatenated_toa_time_series)
 
-    return concatenated_net_toa_time_series
+    return concatenated_toa_time_series
+
 
 def compute_EEI_estimation_errors(SB_constellation, window_days, grid: Grid, frame,
                             method, fill_zeroes_method, avg_method, meas_source,
@@ -1344,13 +1519,33 @@ def compute_rolling_avg_error_time_series(SB_constellation, window_days, grid: G
 def get_acc_to_flux_factor(input_name):
     config_dicts = input_manager.get_dicts(input_name)
     
-    if config_dicts['sc_params']['shape']=="sphere":
-        # Cannonball model
-        diff_reflect = config_dicts['sc_params']['diffReflect']
-        diff_degrade = config_dicts['sc_params']['diffDegrade']
-        K_fact = 1 + (4/3 * diff_degrade * diff_reflect)
+    if "sphere" in config_dicts['sc_params']['shape']:
         mass = config_dicts['sc_params']['mass']
         area = config_dicts['sc_params']['area']
+
+        diff_reflect = config_dicts['sc_params']['diffReflect']
+        diff_degrade = config_dicts['sc_params']['diffDegrade']
+
+        if diff_reflect is not None:
+            K_fact = 1 + (4/3 * diff_degrade * diff_reflect)
+            
+        else:
+            sc_name = config_dicts['sc_params']['sc_name']
+            sc_dict_fname = os.path.join(CONFIG_DIR, 'spacecraft', sc_name+'.pkl')
+            with open(sc_dict_fname, "rb") as f:
+                sat_dict = pickle.load(f)
+            true_avg_area = np.sum(sat_dict['plate_areas']) / 4
+            assert(area==true_avg_area)
+            
+            avg_ca_SW = np.sum(sat_dict['plate_ca_SW']*sat_dict['plate_areas']) / np.sum(sat_dict['plate_areas'])
+            avg_cd_SW = np.sum(sat_dict['plate_cd_SW']*sat_dict['plate_areas']) / np.sum(sat_dict['plate_areas'])
+            avg_cs_SW = np.sum(sat_dict['plate_cs_SW']*sat_dict['plate_areas']) / np.sum(sat_dict['plate_areas'])
+
+            if not(sat_dict['coeff_wl_split']):
+                K_fact = (avg_ca_SW + avg_cs_SW + 13*avg_cd_SW/9)
+            else:
+                NotImplementedError()
+
         return - mass /area * LIGHT_SPEED / K_fact
     
     else:

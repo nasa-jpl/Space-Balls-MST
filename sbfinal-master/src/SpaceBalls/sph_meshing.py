@@ -93,11 +93,14 @@ class Grid(ABC):
                 
 
 
-    def compute_surf_integral(self, field_array, average=False):
+    def compute_surf_integral(self, field_array, average=False, weight_corrections=None):
         field_array = self.vectorize_if_needed(field_array)
         if len(np.shape(field_array))==2:   # axis 1 is time
             #integrated_result = np.sum( self.integration_weights[:, None] * field_array, axis=0)
-            integrated_result = np.einsum('i,ij->j', self.integration_weights, field_array) # slightly more efficient
+            if weight_corrections is None:
+                integrated_result = np.einsum('i,ij->j', self.integration_weights, field_array) # slightly more efficient
+            else:
+                integrated_result = np.einsum('i,ij,ij->j', self.integration_weights, weight_corrections.T, field_array)
         elif len(np.shape(field_array))==1:
             integrated_result = np.sum( self.integration_weights * field_array)
         # TODO: try chatGPT's version: integrated_result = np.tensordot(self.integration_weights, field_array, axes=(0, 0))
